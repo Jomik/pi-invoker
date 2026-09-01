@@ -62,15 +62,6 @@ class ScrollPanel {
     this.scrollOffset = clamp(this.scrollOffset, 0, this.maxOffset);
   }
 
-  /**
-   * Adjust the viewport height and reclamp the scroll offset.
-   * The height is forced to at least 1 so there is always one visible line.
-   */
-  setViewportHeight(h: number): void {
-    this.viewportH = Math.max(1, h);
-    this.scrollOffset = clamp(this.scrollOffset, 0, this.maxOffset);
-  }
-
   get viewportHeight(): number {
     return this.viewportH;
   }
@@ -282,14 +273,10 @@ const CONFIRM_ACTIONS: Array<{ label: string; value: ConfirmAction }> = [
 ];
 
 const CODE_VIEWPORT_HEIGHT = 8;
-// Fixed chrome lines around the code panel (header, 3 separators, "Choose action:",
-// 4 action rows, hint + optional scroll indicator = 11 worst-case).
-const CONFIRM_CHROME_LINES = 11;
-const OVERLAY_MARGIN = 2;
 
 /**
  * Show the full code for `block` in a scrollable panel alongside four
- * action choices using a large responsive overlay.
+ * action choices, rendered inline in the normal message flow.
  *
  * - PageUp / PageDown (or Shift+Up / Shift+Down) scroll the code panel.
  * - Home / End jump to the start or end of the code panel.
@@ -300,144 +287,121 @@ const OVERLAY_MARGIN = 2;
  * Esc always returns `"cancel"` — there is no implicit execution path.
  */
 export function confirmBlock(ctx: ExtensionContext, block: FencedBlock): Promise<ConfirmAction> {
-  return ctx.ui.custom<ConfirmAction>(
-    (tui, theme, _keybindings, done) => {
-      const panel = new ScrollPanel([], CODE_VIEWPORT_HEIGHT);
-      let lastCodeRenderWidth = 0;
-      let lastViewportH = -1;
+  return ctx.ui.custom<ConfirmAction>((tui, theme, _keybindings, done) => {
+    const panel = new ScrollPanel([], CODE_VIEWPORT_HEIGHT);
+    let lastCodeRenderWidth = 0;
 
-      let choiceIndex = 0;
-      let cachedLines: string[] | undefined;
+    let choiceIndex = 0;
+    let cachedLines: string[] | undefined;
 
-      function invalidate(): void {
+    function invalidate(): void {
+      cachedLines = undefined;
+      tui.requestRender();
+    }
+
+    function handleInput(data: string): void {
+      if (matchesKey(data, Key.escape)) {
+        done("cancel");
+        return;
+      }
+
+      if (matchesKey(data, Key.enter)) {
+        const action = CONFIRM_ACTIONS[choiceIndex];
+        done(action?.value ?? "cancel");
+        return;
+      }
+
+      // Scroll the code panel
+      if (matchesKey(data, Key.home)) {
+        panel.scrollToStart();
+        invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.end)) {
+        panel.scrollToEnd();
+        invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.shift("up"))) {
+        panel.scrollBy(-panel.viewportHeight);
+        invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.shift("down"))) {
+        panel.scrollBy(panel.viewportHeight);
+        invalidate();
+        return;
+      }
+
+      // Navigate action choices
+      if (matchesKey(data, Key.up)) {
+        choiceIndex = clamp(choiceIndex - 1, 0, CONFIRM_ACTIONS.length - 1);
+        invalidate();
+        return;
+      }
+      if (matchesKey(data, Key.down)) {
+        choiceIndex = clamp(choiceIndex + 1, 0, CONFIRM_ACTIONS.length - 1);
+        invalidate();
+        return;
+      }
+    }
+
+    function render(width: number): string[] {
+      const w = Math.max(1, width);
+
+      // Re-wrap code at the actual render width when the terminal is resized
+      if (w !== lastCodeRenderWidth) {
+        panel.updateLines(wrapTextWithAnsi(block.contents, w));
+        lastCodeRenderWidth = w;
         cachedLines = undefined;
-        tui.requestRender();
       }
 
-      function handleInput(data: string): void {
-        if (matchesKey(data, Key.escape)) {
-          done("cancel");
-          return;
-        }
+      if (cachedLines) return cachedLines;
 
-        if (matchesKey(data, Key.enter)) {
-          const action = CONFIRM_ACTIONS[choiceIndex];
-          done(action?.value ?? "cancel");
-          return;
-        }
+      const lines: string[] = [];
 
-        // Scroll the code panel
-        if (matchesKey(data, Key.home)) {
-          panel.scrollToStart();
-          invalidate();
-          return;
-        }
-        if (matchesKey(data, Key.end)) {
-          panel.scrollToEnd();
-          invalidate();
-          return;
-        }
-        if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.shift("up"))) {
-          panel.scrollBy(-panel.viewportHeight);
-          invalidate();
-          return;
-        }
-        if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.shift("down"))) {
-          panel.scrollBy(panel.viewportHeight);
-          invalidate();
-          return;
-        }
+      // Header
+      const tagLabel = theme.fg("accent", `[${block.tag}]`);
+      lines.push(truncateToWidth(`${tagLabel} ${theme.fg("text", "Review code")}`, w));
+      lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
 
-        // Navigate action choices
-        if (matchesKey(data, Key.up)) {
-          choiceIndex = clamp(choiceIndex - 1, 0, CONFIRM_ACTIONS.length - 1);
-          invalidate();
-          return;
-        }
-        if (matchesKey(data, Key.down)) {
-          choiceIndex = clamp(choiceIndex + 1, 0, CONFIRM_ACTIONS.length - 1);
-          invalidate();
-          return;
-        }
+      // Scrollable code panel
+      panel.render(lines, w, theme);
+      lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
+
+      // Action choices
+      lines.push(truncateToWidth(theme.fg("dim", "Choose action:"), w));
+      for (let i = 0; i < CONFIRM_ACTIONS.length; i++) {
+        const choice = CONFIRM_ACTIONS[i];
+        if (!choice) continue;
+        const isSelected = i === choiceIndex;
+        const prefix = isSelected ? theme.fg("accent", "> ") : "  ";
+        const label = isSelected ? theme.fg("accent", choice.label) : theme.fg("text", choice.label);
+        lines.push(truncateToWidth(prefix + label, w));
       }
 
-      function render(width: number): string[] {
-        const w = Math.max(1, width);
+      lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
+      lines.push(
+        truncateToWidth(
+          theme.fg("dim", "↑↓ select action • PgUp/PgDn scroll code • Home/End jump • Enter confirm • Esc cancel"),
+          w,
+        ),
+      );
 
-        // Derive viewport height from current terminal size so short terminals
-        // shrink the code panel rather than clipping the action rows.
-        const budget = tui.terminal.rows - 2 * OVERLAY_MARGIN;
-        const viewportH = clamp(budget - CONFIRM_CHROME_LINES, 1, CODE_VIEWPORT_HEIGHT);
-        if (viewportH !== lastViewportH) {
-          panel.setViewportHeight(viewportH);
-          lastViewportH = viewportH;
-          cachedLines = undefined;
-        }
+      cachedLines = lines;
+      return lines;
+    }
 
-        // Re-wrap code at the actual render width when the terminal is resized
-        if (w !== lastCodeRenderWidth) {
-          panel.updateLines(wrapTextWithAnsi(block.contents, w));
-          lastCodeRenderWidth = w;
-          cachedLines = undefined;
-        }
+    const component: Component & { dispose?(): void } = {
+      render,
+      handleInput,
+      invalidate: () => {
+        cachedLines = undefined;
+      },
+    };
 
-        if (cachedLines) return cachedLines;
-
-        const lines: string[] = [];
-
-        // Header
-        const tagLabel = theme.fg("accent", `[${block.tag}]`);
-        lines.push(truncateToWidth(`${tagLabel} ${theme.fg("text", "Review code")}`, w));
-        lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-
-        // Scrollable code panel
-        panel.render(lines, w, theme);
-        lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-
-        // Action choices
-        lines.push(truncateToWidth(theme.fg("dim", "Choose action:"), w));
-        for (let i = 0; i < CONFIRM_ACTIONS.length; i++) {
-          const choice = CONFIRM_ACTIONS[i];
-          if (!choice) continue;
-          const isSelected = i === choiceIndex;
-          const prefix = isSelected ? theme.fg("accent", "> ") : "  ";
-          const label = isSelected ? theme.fg("accent", choice.label) : theme.fg("text", choice.label);
-          lines.push(truncateToWidth(prefix + label, w));
-        }
-
-        lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-        lines.push(
-          truncateToWidth(
-            theme.fg("dim", "↑↓ select action • PgUp/PgDn scroll code • Home/End jump • Enter confirm • Esc cancel"),
-            w,
-          ),
-        );
-
-        cachedLines = lines;
-        return lines;
-      }
-
-      const component: Component & { dispose?(): void } = {
-        render,
-        handleInput,
-        invalidate: () => {
-          cachedLines = undefined;
-        },
-      };
-
-      return component;
-    },
-    {
-      overlay: true,
-      overlayOptions: () => ({
-        width: "80%",
-        minWidth: 60,
-        maxHeight: "100%",
-        anchor: "center",
-        margin: OVERLAY_MARGIN,
-      }),
-    },
-  );
+    return component;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -464,9 +428,6 @@ export async function editBlock(ctx: ExtensionContext, block: FencedBlock): Prom
 // ---------------------------------------------------------------------------
 
 const RESULT_VIEWPORT_HEIGHT = 12;
-// Fixed chrome lines around the output panel (status, 3 separators, "Choose action:",
-// 2 action rows, hint + optional scroll indicator + optional truncation line = 11 worst-case).
-const RESULT_CHROME_LINES = 11;
 
 const RESULT_ACTIONS: Array<{ label: string; value: ResultAction }> = [
   { label: "Close", value: "close" },
@@ -474,7 +435,8 @@ const RESULT_ACTIONS: Array<{ label: string; value: ResultAction }> = [
 ];
 
 /**
- * Display execution results in a large responsive scrollable overlay.
+ * Display execution results in a scrollable panel, rendered inline in the
+ * normal message flow.
  *
  * Shows:
  * - Tag and exit status (zero/nonzero/cancelled).
@@ -491,171 +453,148 @@ export function showExecutionResult(
   block: FencedBlock,
   result: ExecuteResult,
 ): Promise<ResultAction> {
-  return ctx.ui.custom<ResultAction>(
-    (tui, theme, _keybindings, done) => {
-      const panel = new ScrollPanel([], RESULT_VIEWPORT_HEIGHT);
-      let lastOutputRenderWidth = 0;
-      let lastViewportH = -1;
+  return ctx.ui.custom<ResultAction>((tui, theme, _keybindings, done) => {
+    const panel = new ScrollPanel([], RESULT_VIEWPORT_HEIGHT);
+    let lastOutputRenderWidth = 0;
 
-      let cachedLines: string[] | undefined;
+    let cachedLines: string[] | undefined;
 
-      function invalidate(): void {
+    function invalidate(): void {
+      cachedLines = undefined;
+      tui.requestRender();
+    }
+
+    let resultChoiceIndex = 0;
+
+    function handleInput(data: string): void {
+      if (matchesKey(data, Key.escape)) {
+        done("close");
+        return;
+      }
+
+      if (matchesKey(data, Key.enter)) {
+        const action = RESULT_ACTIONS[resultChoiceIndex];
+        done(action?.value ?? "close");
+        return;
+      }
+
+      // Navigate action choices
+      if (matchesKey(data, Key.up)) {
+        resultChoiceIndex = clamp(resultChoiceIndex - 1, 0, RESULT_ACTIONS.length - 1);
+        invalidate();
+        return;
+      }
+
+      if (matchesKey(data, Key.down)) {
+        resultChoiceIndex = clamp(resultChoiceIndex + 1, 0, RESULT_ACTIONS.length - 1);
+        invalidate();
+        return;
+      }
+
+      // Scroll the output panel
+      if (matchesKey(data, Key.home)) {
+        panel.scrollToStart();
+        invalidate();
+        return;
+      }
+
+      if (matchesKey(data, Key.end)) {
+        panel.scrollToEnd();
+        invalidate();
+        return;
+      }
+
+      if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.shift("up"))) {
+        panel.scrollBy(-panel.viewportHeight);
+        invalidate();
+        return;
+      }
+
+      if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.shift("down"))) {
+        panel.scrollBy(panel.viewportHeight);
+        invalidate();
+        return;
+      }
+    }
+
+    function buildStatusLine(w: number): string {
+      const tagStr = theme.fg("accent", `[${block.tag}]`);
+
+      let statusStr: string;
+      if (result.cancelled) {
+        statusStr = theme.fg("warning", "cancelled");
+      } else if (result.exitCode === 0) {
+        statusStr = theme.fg("success", `exit 0`);
+      } else {
+        statusStr = theme.fg("error", `exit ${result.exitCode}`);
+      }
+
+      return truncateToWidth(`${tagStr} ${statusStr}`, w);
+    }
+
+    function render(width: number): string[] {
+      const w = Math.max(1, width);
+
+      // Re-wrap output at the actual render width when the terminal is resized
+      if (w !== lastOutputRenderWidth) {
+        const wrappedOutput = result.output.length > 0 ? wrapTextWithAnsi(result.output, w) : ["(no output)"];
+        panel.updateLines(wrappedOutput);
+        lastOutputRenderWidth = w;
         cachedLines = undefined;
-        tui.requestRender();
       }
 
-      let resultChoiceIndex = 0;
+      if (cachedLines) return cachedLines;
 
-      function handleInput(data: string): void {
-        if (matchesKey(data, Key.escape)) {
-          done("close");
-          return;
-        }
+      const lines: string[] = [];
 
-        if (matchesKey(data, Key.enter)) {
-          const action = RESULT_ACTIONS[resultChoiceIndex];
-          done(action?.value ?? "close");
-          return;
-        }
+      lines.push(buildStatusLine(w));
+      lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
 
-        // Navigate action choices
-        if (matchesKey(data, Key.up)) {
-          resultChoiceIndex = clamp(resultChoiceIndex - 1, 0, RESULT_ACTIONS.length - 1);
-          invalidate();
-          return;
-        }
+      // Scrollable output
+      panel.render(lines, w, theme);
 
-        if (matchesKey(data, Key.down)) {
-          resultChoiceIndex = clamp(resultChoiceIndex + 1, 0, RESULT_ACTIONS.length - 1);
-          invalidate();
-          return;
-        }
-
-        // Scroll the output panel
-        if (matchesKey(data, Key.home)) {
-          panel.scrollToStart();
-          invalidate();
-          return;
-        }
-
-        if (matchesKey(data, Key.end)) {
-          panel.scrollToEnd();
-          invalidate();
-          return;
-        }
-
-        if (matchesKey(data, Key.pageUp) || matchesKey(data, Key.shift("up"))) {
-          panel.scrollBy(-panel.viewportHeight);
-          invalidate();
-          return;
-        }
-
-        if (matchesKey(data, Key.pageDown) || matchesKey(data, Key.shift("down"))) {
-          panel.scrollBy(panel.viewportHeight);
-          invalidate();
-          return;
-        }
-      }
-
-      function buildStatusLine(w: number): string {
-        const tagStr = theme.fg("accent", `[${block.tag}]`);
-
-        let statusStr: string;
-        if (result.cancelled) {
-          statusStr = theme.fg("warning", "cancelled");
-        } else if (result.exitCode === 0) {
-          statusStr = theme.fg("success", `exit 0`);
-        } else {
-          statusStr = theme.fg("error", `exit ${result.exitCode}`);
-        }
-
-        return truncateToWidth(`${tagStr} ${statusStr}`, w);
-      }
-
-      function render(width: number): string[] {
-        const w = Math.max(1, width);
-
-        // Derive viewport height from current terminal size; account for worst-case
-        // chrome including the optional truncation line.
-        const budget = tui.terminal.rows - 2 * OVERLAY_MARGIN;
-        const viewportH = clamp(budget - RESULT_CHROME_LINES, 1, RESULT_VIEWPORT_HEIGHT);
-        if (viewportH !== lastViewportH) {
-          panel.setViewportHeight(viewportH);
-          lastViewportH = viewportH;
-          cachedLines = undefined;
-        }
-
-        // Re-wrap output at the actual render width when the terminal is resized
-        if (w !== lastOutputRenderWidth) {
-          const wrappedOutput = result.output.length > 0 ? wrapTextWithAnsi(result.output, w) : ["(no output)"];
-          panel.updateLines(wrappedOutput);
-          lastOutputRenderWidth = w;
-          cachedLines = undefined;
-        }
-
-        if (cachedLines) return cachedLines;
-
-        const lines: string[] = [];
-
-        lines.push(buildStatusLine(w));
+      // Truncation info when output was cut
+      if (result.truncated) {
         lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-
-        // Scrollable output
-        panel.render(lines, w, theme);
-
-        // Truncation info when output was cut
-        if (result.truncated) {
-          lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-          const retainedLabel = theme.fg("warning", "Output truncated");
-          const byteInfo = `retained ${result.outputBytes}/${result.totalBytes} bytes`;
-          const lineInfo = `${result.outputLines}/${result.totalLines} lines`;
-          lines.push(truncateToWidth(`${retainedLabel} — ${theme.fg("dim", `${byteInfo}, ${lineInfo}`)}`, w));
-        }
-
-        lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-
-        // Action choices
-        lines.push(truncateToWidth(theme.fg("dim", "Choose action:"), w));
-        for (let i = 0; i < RESULT_ACTIONS.length; i++) {
-          const choice = RESULT_ACTIONS[i];
-          if (!choice) continue;
-          const isSelected = i === resultChoiceIndex;
-          const prefix = isSelected ? theme.fg("accent", "> ") : "  ";
-          const label = isSelected ? theme.fg("accent", choice.label) : theme.fg("text", choice.label);
-          lines.push(truncateToWidth(prefix + label, w));
-        }
-
-        lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
-        lines.push(
-          truncateToWidth(
-            theme.fg("dim", "↑↓ select action • PgUp/PgDn scroll • Home/End jump • Enter confirm • Esc close"),
-            w,
-          ),
-        );
-
-        cachedLines = lines;
-        return lines;
+        const retainedLabel = theme.fg("warning", "Output truncated");
+        const byteInfo = `retained ${result.outputBytes}/${result.totalBytes} bytes`;
+        const lineInfo = `${result.outputLines}/${result.totalLines} lines`;
+        lines.push(truncateToWidth(`${retainedLabel} — ${theme.fg("dim", `${byteInfo}, ${lineInfo}`)}`, w));
       }
 
-      const component: Component & { dispose?(): void } = {
-        render,
-        handleInput,
-        invalidate: () => {
-          cachedLines = undefined;
-        },
-      };
+      lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
 
-      return component;
-    },
-    {
-      overlay: true,
-      overlayOptions: () => ({
-        width: "80%",
-        minWidth: 60,
-        maxHeight: "100%",
-        anchor: "center",
-        margin: OVERLAY_MARGIN,
-      }),
-    },
-  );
+      // Action choices
+      lines.push(truncateToWidth(theme.fg("dim", "Choose action:"), w));
+      for (let i = 0; i < RESULT_ACTIONS.length; i++) {
+        const choice = RESULT_ACTIONS[i];
+        if (!choice) continue;
+        const isSelected = i === resultChoiceIndex;
+        const prefix = isSelected ? theme.fg("accent", "> ") : "  ";
+        const label = isSelected ? theme.fg("accent", choice.label) : theme.fg("text", choice.label);
+        lines.push(truncateToWidth(prefix + label, w));
+      }
+
+      lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
+      lines.push(
+        truncateToWidth(
+          theme.fg("dim", "↑↓ select action • PgUp/PgDn scroll • Home/End jump • Enter confirm • Esc close"),
+          w,
+        ),
+      );
+
+      cachedLines = lines;
+      return lines;
+    }
+
+    const component: Component & { dispose?(): void } = {
+      render,
+      handleInput,
+      invalidate: () => {
+        cachedLines = undefined;
+      },
+    };
+
+    return component;
+  });
 }

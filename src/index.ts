@@ -192,8 +192,9 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
     }
 
     // 9. Deliver based on mode:
-    //    - run-and-report: send the invocation message immediately (no overlay).
-    //    - run-locally: show the result overlay; only send if user picks
+    //    - run-and-report: send the invocation message immediately (no inline
+    //      result panel).
+    //    - run-locally: show the inline result panel; only send if user picks
     //      "Send to agent".
     if (deliverMode === "run-and-report") {
       const message = buildInvocationMessage(finalBlock, result, ctx.cwd);

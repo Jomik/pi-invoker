@@ -33,16 +33,16 @@ If the latest assistant message contains a single recognized block it is present
 
 ### Confirmation
 
-The full block is shown in a large scrollable overlay alongside four choices:
+The full block is shown in a scrollable inline panel alongside four choices:
 
 | Choice | Meaning |
 |---|---|
-| **Run locally** | Execute; result shown in a scrollable overlay. Can be closed or sent to the agent. |
+| **Run locally** | Execute; result shown in a scrollable inline panel. Can be closed or sent to the agent. |
 | **Run and report** | Execute; send a structured result to the agent immediately, triggering the next agent turn. |
 | **Edit before running** | Open the block in Pi's multi-line editor; confirmation is required again after saving. |
 | **Cancel** | Dismiss without starting any process. |
 
-The code panel supports **PageUp / PageDown** (or Shift+Up / Shift+Down) to scroll and **Home / End** to jump to the start or end. Arrow keys navigate the action list.
+The code panel is a bounded, fixed-height inline viewport (8 lines) with its own scroll position. **PageUp / PageDown** (or Shift+Up / Shift+Down) scroll it a full page at a time, and **Home / End** jump to the start or end. Arrow keys navigate the action list.
 
 Confirmation is unconditional — there is no bypass path.
 
@@ -52,16 +52,16 @@ Confirmation is unconditional — there is no bypass path.
 
 ### Result display
 
-**Run locally** shows the result in a large scrollable overlay. The overlay displays the language tag, `exit 0` / `exit N` or `cancelled`, and combined output. When output was tail-bounded the retained and total byte and line counts are shown. On shorter terminals, the viewport shrinks to reduce clipping, though action list visibility is not guaranteed at arbitrarily small heights. The overlay supports the same scroll keys as the confirmation panel (**PageUp / PageDown**, **Home / End**).
+**Run locally** shows the result in a scrollable inline panel. The panel is a bounded, fixed-height viewport (12 lines). It displays the language tag, `exit 0` / `exit N` or `cancelled`, and combined output. When output was tail-bounded the retained and total byte and line counts are shown. The panel supports the same scroll keys as the confirmation panel (**PageUp / PageDown**, **Home / End**).
 
 Two actions are available after a local run:
 
 | Action | Meaning |
 |---|---|
-| **Close** | Dismiss the overlay. The agent is not notified. |
+| **Close** | Dismiss the panel. The agent is not notified. |
 | **Send to agent** | Deliver the captured result as a custom message, triggering the next agent turn. Uses the result already captured — the block is not re-executed. |
 
-**Run and report** skips the result overlay entirely and delivers the result to the agent immediately after execution completes.
+**Run and report** skips the result panel entirely and delivers the result to the agent immediately after execution completes.
 
 ### Result delivery
 
@@ -121,4 +121,4 @@ Cancelled executions are reported in both **Send to agent** and **Run and report
 
 ## Design
 
-See [`.pi/DESIGN.md`](.pi/DESIGN.md) for architecture, trust boundary reasoning, and full scope decisions.
+See [`DESIGN.md`](DESIGN.md) for architecture, trust boundary reasoning, and full scope decisions.

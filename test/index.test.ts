@@ -1116,7 +1116,7 @@ describe("invokeFlow — executeBlock rejection", () => {
 // ---------------------------------------------------------------------------
 
 describe("invokeFlow — cancellation", () => {
-  it("run-locally with cancelled result: does NOT deliver when user closes overlay", async () => {
+  it("run-locally with cancelled result: does NOT deliver when user closes result panel", async () => {
     const { ctx } = makeFakeCtx();
     const { deliverMessage, calls } = makeDeliveryCallback();
 
@@ -1218,7 +1218,7 @@ describe("invokeFlow — delivery modes", () => {
     expect(mockShowExecutionResult).not.toHaveBeenCalled();
   });
 
-  it("run-and-report: deliverMessage is called immediately (no overlay)", async () => {
+  it("run-and-report: deliverMessage is called immediately (no result panel)", async () => {
     const { ctx } = makeFakeCtx();
     const { deliverMessage, calls } = makeDeliveryCallback();
 
