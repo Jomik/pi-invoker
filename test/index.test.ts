@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it, type MockInstance, vi } from "vitest"
 import type { FencedBlock } from "../src/blocks.js";
 import type { ExecuteResult } from "../src/executor.js";
 import { type ExecutionDescriptor, MissingInterpreterError, UnsupportedRuntimeError } from "../src/interpreters.js";
+import type { ReportData } from "../src/report.js";
 
 // ---------------------------------------------------------------------------
 // Module mocks (hoisted)
@@ -199,15 +200,22 @@ function makeFakeCtx(options: FakeCtxOptions = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Fake sendUserMessage
+// Fake delivery callback
 // ---------------------------------------------------------------------------
 
-function makeSendUserMessage() {
-  const calls: string[] = [];
-  const sendUserMessage = vi.fn((content: string) => {
-    calls.push(content);
+type InvocationMessage = {
+  customType: string;
+  display: boolean;
+  content: string;
+  details: ReportData;
+};
+
+function makeDeliveryCallback() {
+  const calls: InvocationMessage[] = [];
+  const deliverMessage = vi.fn((message: InvocationMessage) => {
+    calls.push(message);
   });
-  return { sendUserMessage, calls };
+  return { deliverMessage, calls };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +225,8 @@ function makeSendUserMessage() {
 beforeEach(() => {
   vi.clearAllMocks();
   mockResolveInterpreter.mockReturnValue(FAKE_DESCRIPTOR);
-  mockShowExecutionResult.mockResolvedValue(undefined);
+  // Default: showExecutionResult returns "close" (user dismisses without sending)
+  mockShowExecutionResult.mockResolvedValue("close");
 });
 
 // ---------------------------------------------------------------------------
@@ -227,9 +236,9 @@ beforeEach(() => {
 describe("invokeFlow — non-TUI mode", () => {
   it("notifies with an error and returns without extracting blocks", async () => {
     const { ctx, notifyCalls } = makeFakeCtx({ mode: "rpc" });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0]?.type).toBe("error");
@@ -239,9 +248,9 @@ describe("invokeFlow — non-TUI mode", () => {
 
   it("exits early in non-TUI mode without attempting execution", async () => {
     const { ctx } = makeFakeCtx({ mode: "json" });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
@@ -255,7 +264,8 @@ describe("extension factory — registration", () => {
   function makeFactoryPi() {
     const registeredCommands: Record<string, { handler: (args: string, ctx: unknown) => Promise<void> }> = {};
     const registeredShortcuts: Record<string, { handler: (ctx: unknown) => Promise<void> }> = {};
-    const sentMessages: string[] = [];
+    const sentMessages: InvocationMessage[] = [];
+    const rendererRegistrations: Record<string, unknown> = {};
 
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const pi: any = {
@@ -265,12 +275,15 @@ describe("extension factory — registration", () => {
       registerShortcut: vi.fn((key: string, opts: { handler: (ctx: unknown) => Promise<void> }) => {
         registeredShortcuts[key] = opts;
       }),
-      sendUserMessage: vi.fn((content: string) => {
-        sentMessages.push(content);
+      registerMessageRenderer: vi.fn((customType: string, renderer: unknown) => {
+        rendererRegistrations[customType] = renderer;
+      }),
+      sendMessage: vi.fn((message: InvocationMessage) => {
+        sentMessages.push(message);
       }),
     };
 
-    return { pi, registeredCommands, registeredShortcuts, sentMessages };
+    return { pi, registeredCommands, registeredShortcuts, sentMessages, rendererRegistrations };
   }
 
   it("/invoke command is registered", () => {
@@ -283,6 +296,20 @@ describe("extension factory — registration", () => {
     const { pi, registeredShortcuts } = makeFactoryPi();
     extension(pi);
     expect(registeredShortcuts["ctrl+shift+i"]).toBeDefined();
+  });
+
+  it("registerMessageRenderer is called with INVOCATION_RESULT_CUSTOM_TYPE", async () => {
+    const { pi, rendererRegistrations } = makeFactoryPi();
+    const { INVOCATION_RESULT_CUSTOM_TYPE } = await import("../src/report.js");
+    extension(pi);
+    expect(rendererRegistrations[INVOCATION_RESULT_CUSTOM_TYPE]).toBeDefined();
+    expect(typeof rendererRegistrations[INVOCATION_RESULT_CUSTOM_TYPE]).toBe("function");
+  });
+
+  it("registerMessageRenderer is called exactly once", async () => {
+    const { pi } = makeFactoryPi();
+    extension(pi);
+    expect(pi.registerMessageRenderer).toHaveBeenCalledOnce();
   });
 
   it("command handler calls waitForIdle before reading the session branch", async () => {
@@ -338,6 +365,234 @@ describe("extension factory — registration", () => {
     expect(notifyCalls[0]?.type).toBe("warning");
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
+
+  it("command handler uses sendMessage with triggerTurn: true for run-and-report", async () => {
+    const { pi, registeredCommands, sentMessages } = makeFactoryPi();
+    extension(pi);
+
+    const { ctx } = makeFakeCtx();
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    const invokeHandler = registeredCommands.invoke;
+    if (!invokeHandler) throw new Error("invoke command not registered");
+    await invokeHandler.handler("", ctx);
+
+    expect(sentMessages).toHaveLength(1);
+    expect(pi.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ customType: expect.any(String) }), {
+      triggerTurn: true,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. Active-invocation guard
+// ---------------------------------------------------------------------------
+
+describe("extension factory — active-invocation guard", () => {
+  function makeFactoryPi() {
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const pi: any = {
+      registerCommand: vi.fn(),
+      registerShortcut: vi.fn(),
+      registerMessageRenderer: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    return pi;
+  }
+
+  it("command rejected immediately when an invocation is already active", async () => {
+    const pi = makeFactoryPi();
+    extension(pi);
+
+    // Capture the registered handlers
+    const [_invokeArgs, invokeOpts] = pi.registerCommand.mock.calls[0] as [
+      string,
+      { handler: (args: string, ctx: unknown) => Promise<void> },
+    ];
+    const invokeHandler = invokeOpts.handler;
+
+    // Set up a ctx whose waitForIdle never resolves (so the first invocation hangs mid-flight)
+    let resolveIdle!: () => void;
+    const idlePromise = new Promise<void>((res) => {
+      resolveIdle = res;
+    });
+
+    const notifyCalls1: { message: string; type?: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx1: any = {
+      mode: "tui",
+      cwd: "/project",
+      sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
+      waitForIdle: vi.fn().mockReturnValue(idlePromise),
+      isIdle: () => true,
+      ui: {
+        notify: vi.fn((m: string, t?: string) => notifyCalls1.push({ message: m, type: t })),
+        custom: vi.fn(),
+      },
+    };
+
+    const notifyCalls2: { message: string; type?: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx2: any = {
+      mode: "tui",
+      cwd: "/project",
+      sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      isIdle: () => true,
+      ui: {
+        notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
+        custom: vi.fn(),
+      },
+    };
+
+    // Start first invocation (hangs at waitForIdle — guard is acquired synchronously)
+    const first = invokeHandler("", ctx1);
+
+    // Second command arrives while first is in progress
+    await invokeHandler("", ctx2);
+
+    // Second should have been rejected immediately with a warning
+    expect(notifyCalls2).toHaveLength(1);
+    expect(notifyCalls2[0]?.type).toBe("warning");
+    expect(notifyCalls2[0]?.message).toContain("already in progress");
+
+    // Second does NOT call waitForIdle
+    expect(ctx2.waitForIdle).not.toHaveBeenCalled();
+
+    // Resolve the first invocation's idle (branch is empty → "no assistant message" warning)
+    resolveIdle();
+    await first;
+  });
+
+  it("shortcut rejected immediately when an invocation is already active", async () => {
+    const pi = makeFactoryPi();
+    extension(pi);
+
+    const [_shortcutKey, shortcutOpts] = pi.registerShortcut.mock.calls[0] as [
+      string,
+      { handler: (ctx: unknown) => Promise<void> },
+    ];
+    const shortcutHandler = shortcutOpts.handler;
+    const [_invokeKey, invokeOpts] = pi.registerCommand.mock.calls[0] as [
+      string,
+      { handler: (args: string, ctx: unknown) => Promise<void> },
+    ];
+    const invokeHandler = invokeOpts.handler;
+
+    // Hang the command invocation at waitForIdle so guard stays acquired
+    let resolveIdle!: () => void;
+    const idlePromise = new Promise<void>((res) => {
+      resolveIdle = res;
+    });
+
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx1: any = {
+      mode: "tui",
+      cwd: "/project",
+      sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
+      waitForIdle: vi.fn().mockReturnValue(idlePromise),
+      isIdle: () => true,
+      ui: { notify: vi.fn(), custom: vi.fn() },
+    };
+
+    const notifyCalls2: { message: string; type?: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx2: any = {
+      mode: "tui",
+      cwd: "/project",
+      sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
+      isIdle: () => true,
+      ui: {
+        notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
+        custom: vi.fn(),
+      },
+    };
+
+    const first = invokeHandler("", ctx1);
+
+    // Shortcut fires while command is in progress
+    await shortcutHandler(ctx2);
+
+    expect(notifyCalls2).toHaveLength(1);
+    expect(notifyCalls2[0]?.type).toBe("warning");
+    expect(notifyCalls2[0]?.message).toContain("already in progress");
+
+    resolveIdle();
+    await first;
+  });
+
+  it("guard is released after cancel so a subsequent invocation proceeds", async () => {
+    const pi = makeFactoryPi();
+    extension(pi);
+
+    const [_key, invokeOpts] = pi.registerCommand.mock.calls[0] as [
+      string,
+      { handler: (args: string, ctx: unknown) => Promise<void> },
+    ];
+    const invokeHandler = invokeOpts.handler;
+
+    // First invocation: cancel from confirmBlock
+    mockConfirmBlock.mockResolvedValueOnce("cancel");
+    const { ctx: ctx1 } = makeFakeCtx();
+    await invokeHandler("", ctx1);
+
+    // Guard should have been released; second invocation should succeed
+    const notifyCalls2: { message: string; type?: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx2: any = {
+      mode: "tui",
+      cwd: "/project",
+      sessionManager: { getBranch: ctx1.sessionManager.getBranch },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      isIdle: () => true,
+      ui: {
+        notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
+        custom: vi.fn(),
+      },
+    };
+    mockConfirmBlock.mockResolvedValueOnce("cancel");
+    await invokeHandler("", ctx2);
+
+    // No "already in progress" warning
+    expect(notifyCalls2.some((n) => n.message.includes("already in progress"))).toBe(false);
+  });
+
+  it("guard is released after a thrown/rejected path so a subsequent invocation proceeds", async () => {
+    const pi = makeFactoryPi();
+    extension(pi);
+
+    const [_key, invokeOpts] = pi.registerCommand.mock.calls[0] as [
+      string,
+      { handler: (args: string, ctx: unknown) => Promise<void> },
+    ];
+    const invokeHandler = invokeOpts.handler;
+
+    // First invocation: executeBlock throws
+    mockConfirmBlock.mockResolvedValueOnce("run-and-report");
+    mockExecuteBlock.mockRejectedValueOnce(new Error("spawn failed"));
+    const { ctx: ctx1 } = makeFakeCtx();
+    await invokeHandler("", ctx1);
+
+    // Guard should have been released; second invocation should proceed
+    const notifyCalls2: { message: string; type?: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx2: any = {
+      mode: "tui",
+      cwd: "/project",
+      sessionManager: { getBranch: ctx1.sessionManager.getBranch },
+      waitForIdle: vi.fn().mockResolvedValue(undefined),
+      isIdle: () => true,
+      ui: {
+        notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
+        custom: vi.fn(),
+      },
+    };
+    mockConfirmBlock.mockResolvedValueOnce("cancel");
+    await invokeHandler("", ctx2);
+
+    expect(notifyCalls2.some((n) => n.message.includes("already in progress"))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -347,9 +602,9 @@ describe("extension factory — registration", () => {
 describe("invokeFlow — no assistant message", () => {
   it("notifies with a warning when there is no assistant message", async () => {
     const { ctx, notifyCalls } = makeFakeCtx({ branch: [] });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0]?.type).toBe("warning");
@@ -368,9 +623,9 @@ describe("invokeFlow — no assistant message", () => {
       },
     ];
     const { ctx, notifyCalls } = makeFakeCtx({ branch });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls[0]?.type).toBe("warning");
   });
@@ -444,11 +699,11 @@ describe("invokeFlow — latest assistant message", () => {
     ];
 
     const { ctx } = makeFakeCtx({ branch });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     // confirmBlock is called only once; check the block's tag comes from the last message.
     expect(mockConfirmBlock).toHaveBeenCalledOnce();
@@ -487,11 +742,11 @@ describe("invokeFlow — latest assistant message", () => {
     ];
 
     const { ctx } = makeFakeCtx({ branch });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockConfirmBlock).toHaveBeenCalledOnce();
     expect(mockConfirmBlock.mock.calls[0]?.[1]?.tag).toBe("python");
@@ -528,11 +783,11 @@ describe("invokeFlow — latest assistant message", () => {
     ];
 
     const { ctx } = makeFakeCtx({ branch });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     // Only one block (from the text part, not the thinking part)
     expect(mockConfirmBlock).toHaveBeenCalledOnce();
@@ -573,9 +828,9 @@ describe("invokeFlow — no recognized blocks", () => {
     ];
 
     const { ctx, notifyCalls } = makeFakeCtx({ branch });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0]?.type).toBe("info");
@@ -590,11 +845,11 @@ describe("invokeFlow — no recognized blocks", () => {
 describe("invokeFlow — single block", () => {
   it("skips pickBlock and goes directly to confirmBlock", async () => {
     const { ctx } = makeFakeCtx(); // default branch has one bash block
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockPickBlock).not.toHaveBeenCalled();
     expect(mockConfirmBlock).toHaveBeenCalledOnce();
@@ -641,11 +896,11 @@ describe("invokeFlow — multiple blocks", () => {
 
   it("calls pickBlock when there are multiple blocks", async () => {
     const { ctx } = makeFakeCtx({ branch: makeBranchWithMultipleBlocks() });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockPickBlock.mockResolvedValue(null); // user dismisses picker
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockPickBlock).toHaveBeenCalledOnce();
     expect(mockConfirmBlock).not.toHaveBeenCalled();
@@ -653,11 +908,11 @@ describe("invokeFlow — multiple blocks", () => {
 
   it("dismissal of picker (null) returns without confirmation", async () => {
     const { ctx } = makeFakeCtx({ branch: makeBranchWithMultipleBlocks() });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockPickBlock.mockResolvedValue(null);
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockConfirmBlock).not.toHaveBeenCalled();
     expect(mockExecuteBlock).not.toHaveBeenCalled();
@@ -665,13 +920,13 @@ describe("invokeFlow — multiple blocks", () => {
 
   it("selected block from picker is passed to confirmBlock", async () => {
     const { ctx } = makeFakeCtx({ branch: makeBranchWithMultipleBlocks() });
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     const selectedBlock: FencedBlock = { tag: "python", contents: "print('second')" };
     mockPickBlock.mockResolvedValue(selectedBlock);
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockConfirmBlock.mock.calls[0]?.[1]).toEqual(selectedBlock);
   });
@@ -684,11 +939,11 @@ describe("invokeFlow — multiple blocks", () => {
 describe("invokeFlow — confirmation loop", () => {
   it("cancel returns without execution", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
@@ -696,30 +951,30 @@ describe("invokeFlow — confirmation loop", () => {
   it("Esc (cancel) returns without execution", async () => {
     // confirmBlock already returns "cancel" for Esc; same test as above.
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("cancel");
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
 
   it("edit then dismissal returns without execution", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("edit");
     mockEditBlock.mockResolvedValue(null); // editor dismissed
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
 
   it("edit reconfirmation: confirmBlock called TWICE before execution", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     const editedBlock: FencedBlock = { tag: "bash", contents: "echo edited" };
     // First confirm → edit; second confirm → run-locally
@@ -727,7 +982,7 @@ describe("invokeFlow — confirmation loop", () => {
     mockEditBlock.mockResolvedValue(editedBlock);
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockConfirmBlock).toHaveBeenCalledTimes(2);
     expect(mockExecuteBlock).toHaveBeenCalledOnce();
@@ -735,14 +990,14 @@ describe("invokeFlow — confirmation loop", () => {
 
   it("second confirmBlock receives the edited block contents", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     const editedBlock: FencedBlock = { tag: "bash", contents: "echo edited" };
     mockConfirmBlock.mockResolvedValueOnce("edit").mockResolvedValueOnce("run-locally");
     mockEditBlock.mockResolvedValue(editedBlock);
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     // Second call to confirmBlock should receive the edited block
     expect(mockConfirmBlock.mock.calls[1]?.[1]).toEqual(editedBlock);
@@ -750,14 +1005,14 @@ describe("invokeFlow — confirmation loop", () => {
 
   it("executeBlock is called with the submitted code (after edit)", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     const editedBlock: FencedBlock = { tag: "bash", contents: "echo edited" };
     mockConfirmBlock.mockResolvedValueOnce("edit").mockResolvedValueOnce("run-locally");
     mockEditBlock.mockResolvedValue(editedBlock);
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     // The code arg to executeBlock should be the edited contents
     expect(mockExecuteBlock.mock.calls[0]?.[1]).toBe("echo edited");
@@ -771,14 +1026,14 @@ describe("invokeFlow — confirmation loop", () => {
 describe("invokeFlow — interpreter errors", () => {
   it("MissingInterpreterError shows error notification and does not execute", async () => {
     const { ctx, notifyCalls } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockResolveInterpreter.mockImplementation(() => {
       throw new MissingInterpreterError("bash");
     });
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls.some((n) => n.type === "error")).toBe(true);
     expect(mockExecuteBlock).not.toHaveBeenCalled();
@@ -786,14 +1041,14 @@ describe("invokeFlow — interpreter errors", () => {
 
   it("UnsupportedRuntimeError shows error notification and does not execute", async () => {
     const { ctx, notifyCalls } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockResolveInterpreter.mockImplementation(() => {
       throw new UnsupportedRuntimeError("v20.0.0");
     });
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls.some((n) => n.type === "error")).toBe(true);
     expect(mockExecuteBlock).not.toHaveBeenCalled();
@@ -801,14 +1056,14 @@ describe("invokeFlow — interpreter errors", () => {
 
   it("generic resolution error shows error notification and does not execute", async () => {
     const { ctx, notifyCalls } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockResolveInterpreter.mockImplementation(() => {
       throw new Error("unexpected resolution failure");
     });
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(notifyCalls.some((n) => n.type === "error")).toBe(true);
     expect(mockExecuteBlock).not.toHaveBeenCalled();
@@ -822,12 +1077,12 @@ describe("invokeFlow — interpreter errors", () => {
 describe("invokeFlow — loader signal", () => {
   it("executeBlock receives an AbortSignal from the loader", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     const signalArg = mockExecuteBlock.mock.calls[0]?.[3];
     expect(signalArg).toBeInstanceOf(AbortSignal);
@@ -835,22 +1090,22 @@ describe("invokeFlow — loader signal", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 10b. executeBlock rejection — loader closes, error notified, no report sent
+// 10b. executeBlock rejection — loader closes, error notified, no delivery
 // ---------------------------------------------------------------------------
 
 describe("invokeFlow — executeBlock rejection", () => {
-  it("notifies execution failure when executeBlock rejects and does not send a report", async () => {
+  it("notifies execution failure when executeBlock rejects and does not deliver a message", async () => {
     const { ctx, notifyCalls } = makeFakeCtx();
-    const { sendUserMessage, calls } = makeSendUserMessage();
+    const { deliverMessage, calls } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-and-report");
     mockExecuteBlock.mockRejectedValue(new Error("spawn failed"));
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     // An error notification should have been shown
     expect(notifyCalls.some((n) => n.type === "error")).toBe(true);
-    // showExecutionResult and sendUserMessage must NOT be called
+    // showExecutionResult and deliverMessage must NOT be called
     expect(mockShowExecutionResult).not.toHaveBeenCalled();
     expect(calls).toHaveLength(0);
   });
@@ -861,43 +1116,50 @@ describe("invokeFlow — executeBlock rejection", () => {
 // ---------------------------------------------------------------------------
 
 describe("invokeFlow — cancellation", () => {
-  it("run-locally: cancelled result does NOT call sendUserMessage", async () => {
+  it("run-locally with cancelled result: does NOT deliver when user closes overlay", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage, calls } = makeSendUserMessage();
+    const { deliverMessage, calls } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockExecuteBlock.mockResolvedValue(makeExecuteResult({ cancelled: true, exitCode: 130 }));
+    // Default mockShowExecutionResult returns "close"
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(calls).toHaveLength(0);
   });
 
-  it("run-and-report: cancelled result DOES call sendUserMessage with structured JSON report", async () => {
+  it("run-locally with cancelled result: DOES deliver when user picks send-to-agent", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage, calls } = makeSendUserMessage();
+    const { deliverMessage, calls } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-locally");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult({ cancelled: true, exitCode: 130 }));
+    mockShowExecutionResult.mockResolvedValue("send-to-agent");
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.details.cancelled).toBe(true);
+    expect(calls[0]?.details.exitCode).toBe(130);
+  });
+
+  it("run-and-report with cancelled result: delivers the invocation message immediately", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage, calls } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-and-report");
     mockExecuteBlock.mockResolvedValue(makeExecuteResult({ cancelled: true, exitCode: 130 }));
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(calls).toHaveLength(1);
     const msg = calls.at(0);
     if (!msg) throw new Error("expected a message");
-    const jsonStart = msg.indexOf("{");
-    const jsonEnd = msg.lastIndexOf("}") + 1;
-    const data = JSON.parse(msg.slice(jsonStart, jsonEnd)) as {
-      cancelled: boolean;
-      exitCode: number;
-      cwd: string;
-      code: string;
-    };
-    expect(data.cancelled).toBe(true);
-    expect(data.exitCode).toBe(130);
-    expect(typeof data.cwd).toBe("string");
-    expect(data.cwd).toBe("/project");
-    expect(typeof data.code).toBe("string");
+    expect(msg.details.cancelled).toBe(true);
+    expect(msg.details.exitCode).toBe(130);
+    expect(msg.details.cwd).toBe("/project");
+    expect(typeof msg.details.code).toBe("string");
   });
 });
 
@@ -906,60 +1168,110 @@ describe("invokeFlow — cancellation", () => {
 // ---------------------------------------------------------------------------
 
 describe("invokeFlow — delivery modes", () => {
-  it("run-locally: showExecutionResult is called", async () => {
+  it("run-locally: showExecutionResult IS called", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(mockShowExecutionResult).toHaveBeenCalledOnce();
   });
 
-  it("run-locally: sendUserMessage is NEVER called", async () => {
+  it("run-locally with close: deliverMessage is NEVER called", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage, calls } = makeSendUserMessage();
+    const { deliverMessage, calls } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-locally");
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+    // Default: mockShowExecutionResult returns "close"
 
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(calls).toHaveLength(0);
   });
 
-  it("run-and-report: showExecutionResult is called before sendUserMessage", async () => {
+  it("run-locally with send-to-agent: deliverMessage IS called once", async () => {
     const { ctx } = makeFakeCtx();
-    const { sendUserMessage } = makeSendUserMessage();
+    const { deliverMessage, calls } = makeDeliveryCallback();
 
-    const orderLog: string[] = [];
-    mockShowExecutionResult.mockImplementation(async () => {
-      orderLog.push("show");
-    });
-    sendUserMessage.mockImplementation(() => {
-      orderLog.push("send");
-    });
-
-    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockConfirmBlock.mockResolvedValue("run-locally");
     mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+    mockShowExecutionResult.mockResolvedValue("send-to-agent");
 
-    await invokeFlow(ctx, sendUserMessage);
-
-    expect(orderLog).toEqual(["show", "send"]);
-  });
-
-  it("run-and-report: sendUserMessage is called with a report containing the tag", async () => {
-    const { ctx } = makeFakeCtx();
-    const { sendUserMessage, calls } = makeSendUserMessage();
-
-    mockConfirmBlock.mockResolvedValue("run-and-report");
-    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
-
-    await invokeFlow(ctx, sendUserMessage);
+    await invokeFlow(ctx, deliverMessage);
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("bash");
+  });
+
+  it("run-and-report: showExecutionResult is NOT called", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(mockShowExecutionResult).not.toHaveBeenCalled();
+  });
+
+  it("run-and-report: deliverMessage is called immediately (no overlay)", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage, calls } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it("run-and-report: delivered message contains the block tag and expected fields", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage, calls } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(calls).toHaveLength(1);
+    const msg = calls.at(0);
+    if (!msg) throw new Error("expected a message");
+    expect(msg.details.tag).toBe("bash");
+    expect(msg.details.cwd).toBe("/project");
+    expect(typeof msg.content).toBe("string");
+    expect(msg.display).toBe(true);
+    expect(typeof msg.customType).toBe("string");
+  });
+
+  it("run-and-report: nonzero exit still delivers the message", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage, calls } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult({ exitCode: 2 }));
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.details.exitCode).toBe(2);
+  });
+
+  it("run-and-report: exactly one delivery per execution", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage, calls } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(calls).toHaveLength(1);
+    expect(mockExecuteBlock).toHaveBeenCalledOnce();
   });
 });

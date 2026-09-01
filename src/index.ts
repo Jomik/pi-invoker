@@ -9,6 +9,11 @@
  * extract fenced code blocks, confirm/edit, execute, show results, and
  * optionally send a structured report.  The slash command waits for Pi to be
  * idle before proceeding; the shortcut returns immediately if Pi is busy.
+ *
+ * An active-invocation guard prevents concurrent invocations from both the
+ * command and the shortcut.  The guard is acquired synchronously before any
+ * UI or async operation; both triggers report immediately when an invocation
+ * is already in progress without waiting, queueing, or opening any UI.
  */
 
 import type { ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -16,7 +21,12 @@ import { BorderedLoader } from "@earendil-works/pi-coding-agent";
 import { extractFencedBlocks, type FencedBlock } from "./blocks.js";
 import { type ExecuteResult, executeBlock } from "./executor.js";
 import { MissingInterpreterError, resolveInterpreter, UnsupportedRuntimeError } from "./interpreters.js";
-import { buildReport } from "./report.js";
+import {
+  buildInvocationMessage,
+  INVOCATION_RESULT_CUSTOM_TYPE,
+  invocationResultRenderer,
+  type ReportData,
+} from "./report.js";
 import { confirmBlock, editBlock, pickBlock, showExecutionResult } from "./ui.js";
 
 // ---------------------------------------------------------------------------
@@ -52,6 +62,22 @@ function extractLatestAssistantText(ctx: ExtensionContext): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Delivery callback type
+// ---------------------------------------------------------------------------
+
+/**
+ * Callback injected into invokeFlow for delivering a completed invocation
+ * result as a Pi custom message.  Receives the fully-built envelope from
+ * buildInvocationMessage.
+ */
+export type DeliverInvocationMessage = (message: {
+  customType: string;
+  display: boolean;
+  content: string;
+  details: ReportData;
+}) => void;
+
+// ---------------------------------------------------------------------------
 // Main orchestration flow
 // ---------------------------------------------------------------------------
 
@@ -63,10 +89,13 @@ function extractLatestAssistantText(ctx: ExtensionContext): string | null {
  * function.  The slash command calls `waitForIdle()` first; the shortcut
  * checks `isIdle()` and returns early if busy.
  *
- * @param ctx - Extension context (mode, sessionManager, ui, cwd, …).
- * @param sendUserMessage - Sends a user message to trigger an LLM turn.
+ * The active-invocation guard is managed by the factory; invokeFlow itself
+ * does not acquire or release the guard.
+ *
+ * @param ctx             - Extension context (mode, sessionManager, ui, cwd, …).
+ * @param deliverMessage  - Sends a custom invocation-result message to Pi.
  */
-export async function invokeFlow(ctx: ExtensionContext, sendUserMessage: (content: string) => void): Promise<void> {
+export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverInvocationMessage): Promise<void> {
   // 1. Require TUI mode; explicit error for other modes.
   if (ctx.mode !== "tui") {
     ctx.ui.notify("/invoke is only available in TUI mode.", "error");
@@ -162,13 +191,20 @@ export async function invokeFlow(ctx: ExtensionContext, sendUserMessage: (conten
       return;
     }
 
-    // 9. Show execution result for both delivery modes.
-    await showExecutionResult(ctx, finalBlock, result);
-
-    // 10. Deliver structured report in run-and-report mode (including cancelled runs).
+    // 9. Deliver based on mode:
+    //    - run-and-report: send the invocation message immediately (no overlay).
+    //    - run-locally: show the result overlay; only send if user picks
+    //      "Send to agent".
     if (deliverMode === "run-and-report") {
-      const report = buildReport(finalBlock, result, ctx.cwd);
-      sendUserMessage(report);
+      const message = buildInvocationMessage(finalBlock, result, ctx.cwd);
+      deliverMessage(message);
+    } else {
+      // run-locally
+      const resultAction = await showExecutionResult(ctx, finalBlock, result);
+      if (resultAction === "send-to-agent") {
+        const message = buildInvocationMessage(finalBlock, result, ctx.cwd);
+        deliverMessage(message);
+      }
     }
 
     // Execution complete — exit the confirmation loop.
@@ -182,16 +218,38 @@ export async function invokeFlow(ctx: ExtensionContext, sendUserMessage: (conten
 
 /** Default export: the Pi extension factory. */
 const extension: ExtensionFactory = (pi) => {
+  // Register the custom message renderer for invocation results.
+  pi.registerMessageRenderer(INVOCATION_RESULT_CUSTOM_TYPE, invocationResultRenderer);
+
+  // Active-invocation guard: prevents concurrent invocations triggered by
+  // both the command and the shortcut.  Acquired synchronously before any
+  // await or UI call; released in a finally block on every exit path.
+  let invocationActive = false;
+
+  // Shared delivery callback: sends a custom invocation-result message to Pi
+  // and triggers the next LLM turn.
+  const deliverMessage: DeliverInvocationMessage = (message) => {
+    pi.sendMessage(message, { triggerTurn: true });
+  };
+
   // Register the /invoke slash command.
   // The command handler waits for Pi to be idle before reading the session
   // branch, ensuring the latest assistant message is complete.
   pi.registerCommand("invoke", {
     description: "Invoke the latest fenced code block from the assistant",
     handler: async (_args, ctx) => {
-      await ctx.waitForIdle();
-      await invokeFlow(ctx, (content) => {
-        pi.sendUserMessage(content);
-      });
+      // Guard: reject immediately if an invocation is already in progress.
+      if (invocationActive) {
+        ctx.ui.notify("An invocation is already in progress.", "warning");
+        return;
+      }
+      invocationActive = true;
+      try {
+        await ctx.waitForIdle();
+        await invokeFlow(ctx, deliverMessage);
+      } finally {
+        invocationActive = false;
+      }
     },
   });
 
@@ -200,13 +258,21 @@ const extension: ExtensionFactory = (pi) => {
   pi.registerShortcut("ctrl+shift+i", {
     description: "Invoke the latest fenced code block from the assistant",
     handler: async (ctx: ExtensionContext) => {
+      // Guard: reject immediately if an invocation is already in progress.
+      if (invocationActive) {
+        ctx.ui.notify("An invocation is already in progress.", "warning");
+        return;
+      }
       if (!ctx.isIdle()) {
         ctx.ui.notify("Agent is busy. Wait for the current response to finish before invoking.", "warning");
         return;
       }
-      await invokeFlow(ctx, (content) => {
-        pi.sendUserMessage(content);
-      });
+      invocationActive = true;
+      try {
+        await invokeFlow(ctx, deliverMessage);
+      } finally {
+        invocationActive = false;
+      }
     },
   });
 };

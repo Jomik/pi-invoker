@@ -11,7 +11,14 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { FencedBlock } from "../src/blocks.js";
 import type { ExecuteResult } from "../src/executor.js";
-import { type ConfirmAction, confirmBlock, editBlock, pickBlock, showExecutionResult } from "../src/ui.js";
+import {
+  type ConfirmAction,
+  confirmBlock,
+  editBlock,
+  pickBlock,
+  type ResultAction,
+  showExecutionResult,
+} from "../src/ui.js";
 
 // ---------------------------------------------------------------------------
 // Fake infrastructure shared across all tests
@@ -21,7 +28,8 @@ import { type ConfirmAction, confirmBlock, editBlock, pickBlock, showExecutionRe
 const fakeTui = {
   mode: "fullscreen",
   children: [],
-  terminal: {},
+  // terminal.rows can be overridden per-driver via makeDriver({ terminalRows: N })
+  terminal: { rows: 100 },
   fullRedraws: 0,
   addChild: () => {},
   removeChild: () => {},
@@ -80,12 +88,19 @@ interface TestComponent {
 /**
  * Builds a fake ExtensionCommandContext that:
  * - Captures the component from the first ctx.ui.custom() call
+ * - Captures the overlay options from ctx.ui.custom() calls
  * - Supports ctx.ui.editor() with a controllable resolve
  *
  * All type assertions are confined here so the rest of the tests stay clean.
  */
-function makeDriver() {
+function makeDriver(driverOpts?: { terminalRows?: number }) {
+  // Build a per-driver TUI so terminal.rows can be controlled per test without
+  // mutating the shared fakeTui baseline (which defaults to 100 rows).
+  const localTui =
+    driverOpts?.terminalRows != null ? { ...fakeTui, terminal: { rows: driverOpts.terminalRows } } : fakeTui;
+
   let capturedComponent: TestComponent | undefined;
+  let capturedCustomOptions: { overlay?: boolean; overlayOptions?: unknown } | undefined;
   let editorResolve: ((s: string | undefined) => void) | undefined;
   let editorTitle: string | undefined;
   let editorPrefill: string | undefined;
@@ -93,7 +108,8 @@ function makeDriver() {
   // biome-ignore lint/suspicious/noExplicitAny: test-only fake
   const ctx: any = {
     ui: {
-      custom(factory: unknown): Promise<unknown> {
+      custom(factory: unknown, options?: unknown): Promise<unknown> {
+        capturedCustomOptions = options as { overlay?: boolean; overlayOptions?: unknown } | undefined;
         return new Promise((resolve) => {
           const f = factory as (
             tui: unknown,
@@ -101,7 +117,7 @@ function makeDriver() {
             keybindings: unknown,
             done: (result: unknown) => void,
           ) => TestComponent;
-          capturedComponent = f(fakeTui, fakeTheme, fakeKeybindings, resolve);
+          capturedComponent = f(localTui, fakeTheme, fakeKeybindings, resolve);
         });
       },
       editor(title: string, prefill?: string): Promise<string | undefined> {
@@ -120,6 +136,10 @@ function makeDriver() {
     get component(): TestComponent {
       if (!capturedComponent) throw new Error("ctx.ui.custom() was not called yet");
       return capturedComponent;
+    },
+    /** Overlay options captured from the most recent ctx.ui.custom() call. */
+    get customOptions(): { overlay?: boolean; overlayOptions?: unknown } | undefined {
+      return capturedCustomOptions;
     },
     /** Editor call captured from the most recent ctx.ui.editor() call. */
     get editor(): { title: string; prefill: string | undefined; resolve: (s: string | undefined) => void } {
@@ -140,7 +160,25 @@ const KEY = {
   pageUp: "\x1b[5~",
   pageDown: "\x1b[6~",
   backspace: "\x7f",
+  home: "\x1b[H",
+  end: "\x1b[F",
 };
+
+/**
+ * Compute the effective overlay line budget for a given terminal row count.
+ * Accounts for the overlay's margin (applied top and bottom) in addition to
+ * the raw maxHeight percentage, matching how Pi sizes its overlays.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: test helper
+function effectiveOverlayBudget(overlayOptionsFn: any, terminalRows: number): number {
+  const opts = overlayOptionsFn();
+  const margin: number = opts.margin ?? 0;
+  const mh = String(opts.maxHeight);
+  const rawHeight = mh.endsWith("%")
+    ? Math.floor((terminalRows * Number.parseFloat(mh)) / 100)
+    : Math.floor(Number(mh));
+  return rawHeight - 2 * margin;
+}
 
 // ---------------------------------------------------------------------------
 // pickBlock
@@ -352,6 +390,67 @@ describe("pickBlock", () => {
 describe("confirmBlock", () => {
   const block: FencedBlock = { tag: "bash", contents: "echo hello" };
 
+  it("uses overlay mode with large responsive dimensions", () => {
+    const driver = makeDriver();
+    void confirmBlock(driver.ctx, block);
+
+    expect(driver.customOptions?.overlay).toBe(true);
+    // overlayOptions should be a function (dynamic) returning width/maxHeight
+    const opts = driver.customOptions?.overlayOptions;
+    expect(typeof opts).toBe("function");
+    // biome-ignore lint/suspicious/noExplicitAny: test
+    const resolved = (opts as any)();
+    expect(resolved.width).toBeDefined();
+    expect(resolved.maxHeight).toBeDefined();
+    expect(resolved.anchor).toBe("center");
+  });
+
+  it("Home key scrolls the code panel to the start", () => {
+    const manyLines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n");
+    const driver = makeDriver();
+    void confirmBlock(driver.ctx, { tag: "bash", contents: manyLines });
+
+    // Initialize the panel with a first render
+    driver.component.render(80);
+
+    // Scroll down first
+    driver.component.handleInput(KEY.pageDown);
+    driver.component.invalidate();
+    const after = driver.component.render(80).join("\n");
+    expect(after).not.toContain("line1\n");
+
+    // Home jumps back to start
+    driver.component.handleInput(KEY.home);
+    driver.component.invalidate();
+    const atStart = driver.component.render(80).join("\n");
+    expect(atStart).toContain("line1");
+  });
+
+  it("End key scrolls the code panel to the end", () => {
+    const manyLines = Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join("\n");
+    const driver = makeDriver();
+    void confirmBlock(driver.ctx, { tag: "bash", contents: manyLines });
+
+    // Initially at start
+    const before = driver.component.render(80).join("\n");
+    expect(before).toContain("line1");
+
+    // End jumps to end of content
+    driver.component.handleInput(KEY.end);
+    driver.component.invalidate();
+    const atEnd = driver.component.render(80).join("\n");
+    expect(atEnd).toContain("line20");
+  });
+
+  it("renders keyboard hint including Home/End navigation", () => {
+    const driver = makeDriver();
+    void confirmBlock(driver.ctx, block);
+
+    const joined = driver.component.render(120).join("\n");
+    expect(joined).toContain("Home");
+    expect(joined).toContain("End");
+  });
+
   it("renders the block tag and all four action labels", () => {
     const driver = makeDriver();
     void confirmBlock(driver.ctx, block);
@@ -436,6 +535,29 @@ describe("confirmBlock", () => {
     for (const line of driver.component.render(width)) {
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
+  });
+
+  // Regression: before this fix the code panel always consumed CODE_VIEWPORT_HEIGHT (8)
+  // lines regardless of terminal size.  On a 16-row terminal that produced ~19 rendered
+  // lines against a live 12-row overlay budget, clipping all action rows.  The fix
+  // derives viewportH from tui.terminal.rows so the total always fits the live budget.
+  it("[REGRESSION] action labels visible on 16-row terminal (short-terminal clipping)", () => {
+    const TERMINAL_ROWS = 16;
+    const codeLines = Array.from({ length: 9 }, (_, i) => `line${i + 1}`).join("\n");
+    const driver = makeDriver({ terminalRows: TERMINAL_ROWS });
+    void confirmBlock(driver.ctx, { tag: "bash", contents: codeLines });
+
+    const budget = effectiveOverlayBudget(driver.customOptions?.overlayOptions, TERMINAL_ROWS);
+    const rendered = driver.component.render(80);
+
+    // Line count must fit within the overlay budget.
+    expect(rendered.length).toBeLessThanOrEqual(budget);
+    // All four action labels must survive after Pi clips to budget rows.
+    const visible = rendered.slice(0, budget).join("\n");
+    expect(visible).toContain("Run locally");
+    expect(visible).toContain("Run and report");
+    expect(visible).toContain("Edit before running");
+    expect(visible).toContain("Cancel");
   });
 });
 
@@ -547,22 +669,115 @@ describe("showExecutionResult", () => {
     expect(driver.component.render(80).join("\n")).not.toContain("truncated");
   });
 
-  it("closes on Enter (resolves the promise)", async () => {
+  it("renders both action labels: Close and Send to agent", () => {
+    const driver = makeDriver();
+    void showExecutionResult(driver.ctx, block, makeResult());
+
+    const joined = driver.component.render(80).join("\n");
+    expect(joined).toContain("Close");
+    expect(joined).toContain("Send to agent");
+  });
+
+  it("Enter with Close selected returns 'close'", async () => {
+    const driver = makeDriver();
+    const promise = showExecutionResult(driver.ctx, block, makeResult());
+    driver.component.handleInput(KEY.enter); // Close is selected by default
+    const action = await promise;
+    expect(action).toBe<ResultAction>("close");
+  });
+
+  it("Enter with Send to agent selected returns 'send-to-agent'", async () => {
+    const driver = makeDriver();
+    const promise = showExecutionResult(driver.ctx, block, makeResult());
+    driver.component.handleInput(KEY.down); // move to Send to agent
+    driver.component.handleInput(KEY.enter);
+    const action = await promise;
+    expect(action).toBe<ResultAction>("send-to-agent");
+  });
+
+  it("Esc returns 'close' — not 'send-to-agent'", async () => {
+    const driver = makeDriver();
+    const promise = showExecutionResult(driver.ctx, block, makeResult());
+    driver.component.handleInput(KEY.escape);
+    const action = await promise;
+    expect(action).toBe<ResultAction>("close");
+  });
+
+  it("closes on Enter (resolves the promise) — backward compat", async () => {
     const driver = makeDriver();
     const promise = showExecutionResult(driver.ctx, block, makeResult());
     driver.component.handleInput(KEY.enter);
     await promise;
   });
 
-  it("closes on Esc (resolves the promise)", async () => {
+  it("closes on Esc (resolves the promise) — backward compat", async () => {
     const driver = makeDriver();
     const promise = showExecutionResult(driver.ctx, block, makeResult());
     driver.component.handleInput(KEY.escape);
     await promise;
   });
 
+  it("uses overlay mode with large responsive dimensions", () => {
+    const driver = makeDriver();
+    void showExecutionResult(driver.ctx, block, makeResult());
+
+    expect(driver.customOptions?.overlay).toBe(true);
+    const opts = driver.customOptions?.overlayOptions;
+    expect(typeof opts).toBe("function");
+    // biome-ignore lint/suspicious/noExplicitAny: test
+    const resolved = (opts as any)();
+    expect(resolved.width).toBeDefined();
+    expect(resolved.maxHeight).toBeDefined();
+    expect(resolved.anchor).toBe("center");
+  });
+
+  it("Home key scrolls output panel to start", () => {
+    const longOutput = Array.from({ length: 30 }, (_, i) => `output line ${i + 1}`).join("\n");
+    const driver = makeDriver();
+    void showExecutionResult(driver.ctx, block, makeResult({ output: longOutput, outputLines: 30, totalLines: 30 }));
+
+    // Initialize the panel with a first render
+    driver.component.render(80);
+
+    // Scroll down first
+    driver.component.handleInput(KEY.pageDown);
+    driver.component.invalidate();
+    const after = driver.component.render(80).join("\n");
+    expect(after).not.toContain("output line 1\n");
+
+    // Home jumps back to start
+    driver.component.handleInput(KEY.home);
+    driver.component.invalidate();
+    const atStart = driver.component.render(80).join("\n");
+    expect(atStart).toContain("output line 1");
+  });
+
+  it("End key scrolls output panel to end", () => {
+    const longOutput = Array.from({ length: 30 }, (_, i) => `output line ${i + 1}`).join("\n");
+    const driver = makeDriver();
+    void showExecutionResult(driver.ctx, block, makeResult({ output: longOutput, outputLines: 30, totalLines: 30 }));
+
+    const before = driver.component.render(80).join("\n");
+    expect(before).toContain("output line 1");
+
+    driver.component.handleInput(KEY.end);
+    driver.component.invalidate();
+    const atEnd = driver.component.render(80).join("\n");
+    expect(atEnd).toContain("output line 30");
+  });
+
+  it("renders keyboard hint including Home/End navigation", () => {
+    const driver = makeDriver();
+    void showExecutionResult(driver.ctx, block, makeResult());
+
+    const joined = driver.component.render(120).join("\n");
+    expect(joined).toContain("Home");
+    expect(joined).toContain("End");
+  });
+
   it("PageDown advances a full page (RESULT_VIEWPORT_HEIGHT lines)", () => {
-    // 30 lines of output; viewport is 12 lines.  One PageDown should skip 12 lines.
+    // 30 lines of output; default 100-row terminal gives viewport=12 lines.
+    // One PageDown should skip exactly 12 lines (panel.viewportHeight, not old fixed constant).
     const longOutput = Array.from({ length: 30 }, (_, i) => `output line ${i + 1}`).join("\n");
     const driver = makeDriver();
     void showExecutionResult(driver.ctx, block, makeResult({ output: longOutput, outputLines: 30, totalLines: 30 }));
@@ -581,6 +796,27 @@ describe("showExecutionResult", () => {
     expect(after).toContain("output line 13");
   });
 
+  it("PageDown on short terminal advances by live page size, not fixed constant", () => {
+    // On a 16-row terminal the live viewportH is 1 (budget=12, chrome=11).
+    // PageDown must advance by that 1-line live page, not the old fixed RESULT_VIEWPORT_HEIGHT=12.
+    // If it advanced 12 lines, "output line 2" would never appear; advancing 1 line makes it visible.
+    const longOutput = Array.from({ length: 30 }, (_, i) => `output line ${i + 1}`).join("\n");
+    const driver = makeDriver({ terminalRows: 16 });
+    void showExecutionResult(driver.ctx, block, makeResult({ output: longOutput, outputLines: 30, totalLines: 30 }));
+
+    driver.component.render(80);
+
+    driver.component.handleInput(KEY.pageDown);
+    driver.component.invalidate();
+
+    const after = driver.component.render(80).join("\n");
+    // Live page is 1 line: line 1 scrolled out, line 2 now at top.
+    expect(after).not.toContain("output line 1\n");
+    expect(after).toContain("output line 2");
+    // A 12-line fixed jump would skip to line 13 — it must NOT be at the top.
+    expect(after).not.toContain("output line 13\n");
+  });
+
   it("long output is scrollable — scroll indicator appears", () => {
     const longOutput = Array.from({ length: 30 }, (_, i) => `output line ${i + 1}`).join("\n");
     const driver = makeDriver();
@@ -591,23 +827,22 @@ describe("showExecutionResult", () => {
     expect(hasIndicator).toBe(true);
   });
 
-  it("arrow-down scrolls output — first lines scroll out of view", () => {
+  it("up/down keys navigate action choices, not output scroll", () => {
     const longOutput = Array.from({ length: 30 }, (_, i) => `output line ${i + 1}`).join("\n");
     const driver = makeDriver();
     void showExecutionResult(driver.ctx, block, makeResult({ output: longOutput, outputLines: 30, totalLines: 30 }));
 
-    const before = driver.component.render(80).join("\n");
-    expect(before).toContain("output line 1");
+    driver.component.render(80);
 
-    // Scroll down past the viewport
-    for (let i = 0; i < 15; i++) driver.component.handleInput(KEY.down);
+    // Down key navigates action choice, output panel should not scroll
+    driver.component.handleInput(KEY.down); // select 'Send to agent'
     driver.component.invalidate();
-
     const after = driver.component.render(80).join("\n");
-    expect(after).not.toContain("output line 1\n");
+    // Output line 1 should still be visible (action list navigation doesn't scroll output)
+    expect(after).toContain("output line 1");
   });
 
-  it("no rendered line exceeds the given width", () => {
+  it("no rendered line exceeds the given width — resize regression", () => {
     const driver = makeDriver();
     void showExecutionResult(driver.ctx, block, makeResult({ output: "a".repeat(200) }));
 
@@ -615,5 +850,59 @@ describe("showExecutionResult", () => {
     for (const line of driver.component.render(width)) {
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
+  });
+
+  it("truncation and status display regression: all fields render at any width", () => {
+    const driver = makeDriver();
+    void showExecutionResult(
+      driver.ctx,
+      block,
+      makeResult({ truncated: true, outputBytes: 1000, totalBytes: 5000, outputLines: 80, totalLines: 400 }),
+    );
+
+    // Ensure truncation info still renders correctly after a resize
+    const lines40 = driver.component.render(40);
+    const joined40 = lines40.join("\n");
+    for (const line of lines40) {
+      expect(visibleWidth(line)).toBeLessThanOrEqual(40);
+    }
+    // Key data still present at narrow width
+    expect(joined40).toContain("1000");
+    expect(joined40).toContain("5000");
+  });
+
+  // Regression: before this fix the output panel always consumed RESULT_VIEWPORT_HEIGHT
+  // (12) lines regardless of terminal size.  On a 16-row terminal that produced ~21
+  // rendered lines (including the truncation notice) against a live 12-row overlay
+  // budget, clipping both action rows.  The fix derives viewportH from
+  // tui.terminal.rows so the total always fits the live budget.
+  it("[REGRESSION] action labels visible on 16-row terminal (short-terminal clipping)", () => {
+    const TERMINAL_ROWS = 16;
+    // Worst-case chrome: include truncation:true plus counts to trigger the extra
+    // separator and truncation line (11 chrome lines total).
+    const longOutput = Array.from({ length: 13 }, (_, i) => `output line ${i + 1}`).join("\n");
+    const driver = makeDriver({ terminalRows: TERMINAL_ROWS });
+    void showExecutionResult(
+      driver.ctx,
+      block,
+      makeResult({
+        output: longOutput,
+        truncated: true,
+        outputBytes: 5000,
+        totalBytes: 10000,
+        outputLines: 13,
+        totalLines: 26,
+      }),
+    );
+
+    const budget = effectiveOverlayBudget(driver.customOptions?.overlayOptions, TERMINAL_ROWS);
+    const rendered = driver.component.render(80);
+
+    // Line count must fit within the overlay budget.
+    expect(rendered.length).toBeLessThanOrEqual(budget);
+    // Both action labels must survive after Pi clips to budget rows.
+    const visible = rendered.slice(0, budget).join("\n");
+    expect(visible).toContain("Close");
+    expect(visible).toContain("Send to agent");
   });
 });
