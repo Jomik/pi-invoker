@@ -5,7 +5,7 @@
  * and produce no side effects on the agent context.
  */
 
-import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { FencedBlock } from "./blocks.js";
@@ -121,7 +121,7 @@ const PICKER_VIEWPORT_HEIGHT = 10;
  *
  * Returns the selected block, or `null` on cancel.
  */
-export function pickBlock(ctx: ExtensionCommandContext, blocks: FencedBlock[]): Promise<FencedBlock | null> {
+export function pickBlock(ctx: ExtensionContext, blocks: FencedBlock[]): Promise<FencedBlock | null> {
   return ctx.ui.custom<FencedBlock | null>((tui, theme, _keybindings, done) => {
     let filter = "";
     let selectedIndex = 0;
@@ -279,7 +279,7 @@ const CODE_VIEWPORT_HEIGHT = 8;
  * Returns the selected action, or `null` if the UI was dismissed unexpectedly.
  * Esc always returns `"cancel"` — there is no implicit execution path.
  */
-export function confirmBlock(ctx: ExtensionCommandContext, block: FencedBlock): Promise<ConfirmAction> {
+export function confirmBlock(ctx: ExtensionContext, block: FencedBlock): Promise<ConfirmAction> {
   return ctx.ui.custom<ConfirmAction>((tui, theme, _keybindings, done) => {
     const panel = new ScrollPanel([], CODE_VIEWPORT_HEIGHT);
     let lastCodeRenderWidth = 0;
@@ -397,7 +397,7 @@ export function confirmBlock(ctx: ExtensionCommandContext, block: FencedBlock): 
  * This function does NOT execute or confirm the result — task 5 always calls
  * `confirmBlock` again after `editBlock`.
  */
-export async function editBlock(ctx: ExtensionCommandContext, block: FencedBlock): Promise<FencedBlock | null> {
+export async function editBlock(ctx: ExtensionContext, block: FencedBlock): Promise<FencedBlock | null> {
   const result = await ctx.ui.editor(`Edit [${block.tag}] block`, block.contents);
   if (result === undefined) return null;
   return { tag: block.tag, contents: result };
@@ -419,11 +419,7 @@ const RESULT_VIEWPORT_HEIGHT = 12;
  *
  * Enter or Esc closes the panel.  No agent context side effect.
  */
-export function showExecutionResult(
-  ctx: ExtensionCommandContext,
-  block: FencedBlock,
-  result: ExecuteResult,
-): Promise<void> {
+export function showExecutionResult(ctx: ExtensionContext, block: FencedBlock, result: ExecuteResult): Promise<void> {
   return ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
     const panel = new ScrollPanel([], RESULT_VIEWPORT_HEIGHT);
     let lastOutputRenderWidth = 0;

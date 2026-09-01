@@ -6,7 +6,7 @@
  * resolves the returned promise only when the component calls done().
  */
 
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { FencedBlock } from "../src/blocks.js";
@@ -115,7 +115,7 @@ function makeDriver() {
   };
 
   return {
-    ctx: ctx as ExtensionCommandContext,
+    ctx: ctx as ExtensionContext,
     /** Component captured from the most recent ctx.ui.custom() call. */
     get component(): TestComponent {
       if (!capturedComponent) throw new Error("ctx.ui.custom() was not called yet");
