@@ -105,7 +105,7 @@ class ScrollPanel {
     }
     if (this.lines.length > this.viewportH) {
       const shown = Math.min(this.scrollOffset + this.viewportH, this.lines.length);
-      const indicator = `[${shown}/${this.lines.length} lines — PgUp/PgDn/Home/End to scroll]`;
+      const indicator = `[${shown}/${this.lines.length} lines — Shift+Up/Down/Home/End to scroll]`;
       output.push(truncateToWidth(theme.fg("dim", indicator), width));
     }
   }
@@ -278,7 +278,7 @@ const CODE_VIEWPORT_HEIGHT = 8;
  * Show the full code for `block` in a scrollable panel alongside four
  * action choices, rendered inline in the normal message flow.
  *
- * - PageUp / PageDown (or Shift+Up / Shift+Down) scroll the code panel.
+ * - Shift+Up / Shift+Down scroll the code panel a full page at a time.
  * - Home / End jump to the start or end of the code panel.
  * - Arrow keys navigate the action list.
  * - Enter confirms the selected action; Esc cancels (equivalent to "cancel").
@@ -383,7 +383,7 @@ export function confirmBlock(ctx: ExtensionContext, block: FencedBlock): Promise
       lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
       lines.push(
         truncateToWidth(
-          theme.fg("dim", "↑↓ select action • PgUp/PgDn scroll code • Home/End jump • Enter confirm • Esc cancel"),
+          theme.fg("dim", "↑↓ select action • Shift+↑↓ scroll code • Home/End jump • Enter confirm • Esc cancel"),
           w,
         ),
       );
@@ -446,7 +446,7 @@ const RESULT_ACTIONS: Array<{ label: string; value: ResultAction }> = [
  *
  * Arrow keys navigate the action list; Enter confirms the selected action.
  * Esc is equivalent to Close — no implicit re-execution path.
- * PageUp/PageDown scroll the output panel; Home/End jump to start/end.
+ * Shift+Up/Shift+Down scroll the output panel a full page at a time; Home/End jump to start/end.
  */
 export function showExecutionResult(
   ctx: ExtensionContext,
@@ -578,7 +578,7 @@ export function showExecutionResult(
       lines.push(truncateToWidth(theme.fg("border", "─".repeat(w)), w));
       lines.push(
         truncateToWidth(
-          theme.fg("dim", "↑↓ select action • PgUp/PgDn scroll • Home/End jump • Enter confirm • Esc close"),
+          theme.fg("dim", "↑↓ select action • Shift+↑↓ scroll • Home/End jump • Enter confirm • Esc close"),
           w,
         ),
       );

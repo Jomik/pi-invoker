@@ -423,6 +423,16 @@ describe("confirmBlock", () => {
     expect(joined).toContain("End");
   });
 
+  it("advertises Shift+Up/Down as the page-scroll hint, not PgUp/PgDn", () => {
+    const driver = makeDriver();
+    void confirmBlock(driver.ctx, block);
+
+    const joined = driver.component.render(120).join("\n");
+    expect(joined).toContain("Shift+");
+    expect(joined).not.toContain("PgUp");
+    expect(joined).not.toContain("PgDn");
+  });
+
   it("renders the block tag and all four action labels", () => {
     const driver = makeDriver();
     void confirmBlock(driver.ctx, block);
@@ -727,6 +737,16 @@ describe("showExecutionResult", () => {
     driver.component.invalidate();
     const atEnd = driver.component.render(80).join("\n");
     expect(atEnd).toContain("output line 30");
+  });
+
+  it("advertises Shift+Up/Down as the page-scroll hint, not PgUp/PgDn", () => {
+    const driver = makeDriver();
+    void showExecutionResult(driver.ctx, block, makeResult());
+
+    const joined = driver.component.render(120).join("\n");
+    expect(joined).toContain("Shift+");
+    expect(joined).not.toContain("PgUp");
+    expect(joined).not.toContain("PgDn");
   });
 
   it("renders keyboard hint including Home/End navigation", () => {

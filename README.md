@@ -42,7 +42,7 @@ The full block is shown in a scrollable inline panel alongside four choices:
 | **Edit before running** | Open the block in Pi's multi-line editor; confirmation is required again after saving. |
 | **Cancel** | Dismiss without starting any process. |
 
-The code panel is a bounded, fixed-height inline viewport (8 lines) with its own scroll position. **PageUp / PageDown** (or Shift+Up / Shift+Down) scroll it a full page at a time, and **Home / End** jump to the start or end. Arrow keys navigate the action list.
+The code panel is a bounded, fixed-height inline viewport (8 lines) with its own scroll position. **Shift+Up / Shift+Down** scroll it a full page at a time, and **Home / End** jump to the start or end. Arrow keys navigate the action list.
 
 Confirmation is unconditional — there is no bypass path.
 
@@ -52,7 +52,7 @@ Confirmation is unconditional — there is no bypass path.
 
 ### Result display
 
-**Run locally** shows the result in a scrollable inline panel. The panel is a bounded, fixed-height viewport (12 lines). It displays the language tag, `exit 0` / `exit N` or `cancelled`, and combined output. When output was tail-bounded the retained and total byte and line counts are shown. The panel supports the same scroll keys as the confirmation panel (**PageUp / PageDown**, **Home / End**).
+**Run locally** shows the result in a scrollable inline panel. The panel is a bounded, fixed-height viewport (12 lines). It displays the language tag, `exit 0` / `exit N` or `cancelled`, and combined output. When output was tail-bounded the retained and total byte and line counts are shown. The panel supports the same scroll keys as the confirmation panel (**Shift+Up / Shift+Down**, **Home / End**).
 
 Two actions are available after a local run:
 
