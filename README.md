@@ -39,7 +39,7 @@ The full block is shown in a scrollable inline panel alongside four choices:
 |---|---|
 | **Run locally** | Execute; result shown in a scrollable inline panel. Can be closed or sent to the agent. |
 | **Run and report** | Execute; send a structured result to the agent immediately, triggering the next agent turn. |
-| **Edit before running** | Open the block in Pi's multi-line editor; confirmation is required again after saving. |
+| **Edit before running** | Open the block directly in an external editor (temporary script file, no confirmation panel involved). |
 | **Cancel** | Dismiss without starting any process. |
 
 The code panel is a bounded, fixed-height inline viewport (8 lines) with its own scroll position. **Shift+Up / Shift+Down** scroll it a full page at a time, and **Home / End** jump to the start or end. Arrow keys navigate the action list.
@@ -48,7 +48,9 @@ Confirmation is unconditional — there is no bypass path.
 
 ### Editing
 
-**Edit before running** opens Pi's multi-line editor (which honours any external-editor Pi has configured) prefilled with the block contents. On save, confirmation restarts with the edited code. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts. The extension does not directly invoke or manage an external editor; that is Pi's responsibility.
+**Edit before running** launches an external editor directly — it does not use Pi's built-in multi-line editor or its `externalEditor` setting. The block's exact contents are written to a fresh temporary directory (`pi-invoker-<random>`) as `script<suffix>`, where `<suffix>` is a fixed extension derived from the block's language tag (`.sh`, `.zsh`, `.fish`, `.py`, `.js`, `.ts`, or `.txt` for anything unrecognized). The command is resolved in order: `$VISUAL`, then `$EDITOR`, then the platform default (`notepad` on Windows, `nano` elsewhere) — command splitting is a plain space split, matching Pi's own resolution logic, with no shell parsing or quoting support.
+
+The TUI is stopped while the editor owns the terminal and restarted (with a full render) once the editor exits, regardless of outcome. On a clean (zero) exit the edited script is read back (leading BOM and one trailing newline stripped) and **confirmation is required again** with the edited code. Launch failure or a nonzero exit discards the edit and returns to confirmation unchanged. The temporary directory is always removed. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts.
 
 ### Result display
 

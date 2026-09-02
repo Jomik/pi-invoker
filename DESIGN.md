@@ -30,10 +30,12 @@ Before execution, the selected block is displayed in a scrollable inline panel a
 |---|---|
 | **Run locally** | Execute, then display the result in a scrollable inline panel. The user may close it without reporting or send the completed result to the agent afterward. |
 | **Run and report** | Execute, then immediately inject a structured extension result into agent context and trigger the next conversation turn without showing the result panel. |
-| **Edit before running** | Open the block contents in Pi's multi-line editor, which supports the configured external-editor shortcut. The same four confirmation choices are shown again after editing, and the user may edit repeatedly before execution. |
+| **Edit before running** | Open the block contents directly in an external editor using a temporary script file whose suffix is derived from the fenced tag. The same four confirmation choices are shown again after a successful edit, and the user may edit repeatedly before execution. |
 | **Cancel** | Pre-execution dismissal: no process is started and no report is sent. |
 
 The confirmation and result panels use bounded fixed-height viewports with page, start, and end navigation, so the complete script or output remains accessible without turning either panel into a popup.
+
+External editing resolves `$VISUAL`, then `$EDITOR`, then the platform default (`notepad` on Windows or `nano` elsewhere). The terminal UI is stopped while the editor owns the terminal and restarted afterward. The temporary file and directory are removed on every exit path. A successful zero exit reads the edited script and returns to confirmation; launch failure or a nonzero exit returns to confirmation with the current script unchanged — no process is started and no report is sent.
 
 Arbitrary model-generated code always requires this explicit human confirmation. There is no bypass path.
 

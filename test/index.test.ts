@@ -960,15 +960,20 @@ describe("invokeFlow — confirmation loop", () => {
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
 
-  it("edit then dismissal returns without execution", async () => {
+  it("edit returning null (launch failure/cancellation) loops back to confirmBlock with the unchanged current block, without executing", async () => {
     const { ctx } = makeFakeCtx();
     const { deliverMessage } = makeDeliveryCallback();
 
-    mockConfirmBlock.mockResolvedValue("edit");
-    mockEditBlock.mockResolvedValue(null); // editor dismissed
+    // First confirm -> edit; editBlock returns null (launch failure/nonzero/
+    // cancellation); second confirm -> cancel.
+    mockConfirmBlock.mockResolvedValueOnce("edit").mockResolvedValueOnce("cancel");
+    mockEditBlock.mockResolvedValue(null);
 
     await invokeFlow(ctx, deliverMessage);
 
+    expect(mockConfirmBlock).toHaveBeenCalledTimes(2);
+    // Second call receives the same, unchanged block as the first call.
+    expect(mockConfirmBlock.mock.calls[1]?.[1]).toEqual(mockConfirmBlock.mock.calls[0]?.[1]);
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
 

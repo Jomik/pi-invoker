@@ -8,8 +8,9 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FencedBlock } from "../src/blocks.js";
+import { editInExternalEditor } from "../src/editor.js";
 import type { ExecuteResult } from "../src/executor.js";
 import {
   type ConfirmAction,
@@ -19,6 +20,12 @@ import {
   type ResultAction,
   showExecutionResult,
 } from "../src/ui.js";
+
+vi.mock("../src/editor.js", () => ({
+  editInExternalEditor: vi.fn(),
+}));
+
+const editInExternalEditorMock = vi.mocked(editInExternalEditor);
 
 // ---------------------------------------------------------------------------
 // Fake infrastructure shared across all tests
@@ -91,12 +98,44 @@ interface TestComponent {
  *
  * All type assertions are confined here so the rest of the tests stay clean.
  */
-function makeDriver() {
+interface MakeDriverOverrides {
+  /** Replaces the default stop() counter with a custom implementation (e.g. to observe ordering or throw). */
+  stop?(): void;
+  /** Replaces the default start() counter with a custom implementation (e.g. to observe ordering or throw). */
+  start?(): void;
+  /** Replaces the default requestRender() recorder with a custom implementation (e.g. to observe ordering or throw). */
+  requestRender?(force?: boolean): void;
+}
+
+function makeDriver(overrides?: MakeDriverOverrides) {
   let capturedComponent: TestComponent | undefined;
   let capturedCustomOptions: { overlay?: boolean; overlayOptions?: unknown } | undefined;
   let editorResolve: ((s: string | undefined) => void) | undefined;
   let editorTitle: string | undefined;
   let editorPrefill: string | undefined;
+  let editorCalled = false;
+  let tuiStopCount = 0;
+  let tuiStartCount = 0;
+  const tuiRequestRenderCalls: boolean[] = [];
+
+  const tui = {
+    ...fakeTui,
+    stop:
+      overrides?.stop ??
+      (() => {
+        tuiStopCount++;
+      }),
+    start:
+      overrides?.start ??
+      (() => {
+        tuiStartCount++;
+      }),
+    requestRender:
+      overrides?.requestRender ??
+      ((force?: boolean) => {
+        tuiRequestRenderCalls.push(Boolean(force));
+      }),
+  };
 
   // biome-ignore lint/suspicious/noExplicitAny: test-only fake
   const ctx: any = {
@@ -110,10 +149,11 @@ function makeDriver() {
             keybindings: unknown,
             done: (result: unknown) => void,
           ) => TestComponent;
-          capturedComponent = f(fakeTui, fakeTheme, fakeKeybindings, resolve);
+          capturedComponent = f(tui, fakeTheme, fakeKeybindings, resolve);
         });
       },
       editor(title: string, prefill?: string): Promise<string | undefined> {
+        editorCalled = true;
         editorTitle = title;
         editorPrefill = prefill;
         return new Promise<string | undefined>((resolve) => {
@@ -125,6 +165,22 @@ function makeDriver() {
 
   return {
     ctx: ctx as ExtensionContext,
+    /** Whether ctx.ui.editor() was called. */
+    get editorCalled(): boolean {
+      return editorCalled;
+    },
+    /** Number of times the driven TUI's stop() was called. */
+    get tuiStopCount(): number {
+      return tuiStopCount;
+    },
+    /** Number of times the driven TUI's start() was called. */
+    get tuiStartCount(): number {
+      return tuiStartCount;
+    },
+    /** `force` argument recorded for each requestRender() call on the driven TUI. */
+    get tuiRequestRenderCalls(): boolean[] {
+      return tuiRequestRenderCalls;
+    },
     /** Component captured from the most recent ctx.ui.custom() call. */
     get component(): TestComponent {
       if (!capturedComponent) throw new Error("ctx.ui.custom() was not called yet");
@@ -547,34 +603,111 @@ describe("confirmBlock", () => {
 describe("editBlock", () => {
   const block: FencedBlock = { tag: "bash", contents: "echo original" };
 
-  it("opens editor with title containing the tag and prefilled with block contents", async () => {
-    const driver = makeDriver();
-    const promise = editBlock(driver.ctx, block);
-    const { title, prefill, resolve } = driver.editor;
-
-    expect(title).toContain("bash");
-    expect(prefill).toBe("echo original");
-
-    resolve(undefined); // dismiss
-    await promise;
+  beforeEach(() => {
+    editInExternalEditorMock.mockReset();
   });
 
-  it("returns an updated block preserving the tag when the editor is saved", async () => {
+  it("launches the external editor directly with the block's tag and contents, without calling ctx.ui.editor", async () => {
+    editInExternalEditorMock.mockResolvedValue("echo updated");
     const driver = makeDriver();
-    const promise = editBlock(driver.ctx, block);
-    driver.editor.resolve("echo updated");
 
-    const updated = await promise;
-    expect(updated?.tag).toBe("bash");
-    expect(updated?.contents).toBe("echo updated");
+    await editBlock(driver.ctx, block);
+
+    expect(editInExternalEditorMock).toHaveBeenCalledWith("echo original", "bash");
+    expect(driver.editorCalled).toBe(false);
   });
 
-  it("returns null when the editor is dismissed", async () => {
-    const driver = makeDriver();
-    const promise = editBlock(driver.ctx, block);
-    driver.editor.resolve(undefined);
+  it("stops the TUI before launching, restarts it, and requests a full render after a successful edit", async () => {
+    // Shared ordered event log proving stop() precedes the edit helper, and
+    // start()/full render only occur after the helper settles.
+    const events: string[] = [];
+    editInExternalEditorMock.mockImplementation(async () => {
+      events.push("edit-helper");
+      return "echo updated";
+    });
 
-    expect(await promise).toBeNull();
+    const driver = makeDriver({
+      stop: () => events.push("stop"),
+      start: () => events.push("start"),
+      requestRender: (force) => events.push(force ? "render:full" : "render"),
+    });
+
+    await editBlock(driver.ctx, block);
+
+    expect(events).toEqual(["stop", "edit-helper", "start", "render:full"]);
+  });
+
+  it("returns an updated block preserving the tag when the edit succeeds", async () => {
+    editInExternalEditorMock.mockResolvedValue("echo updated");
+    const driver = makeDriver();
+
+    const updated = await editBlock(driver.ctx, block);
+
+    expect(updated).toEqual({ tag: "bash", contents: "echo updated" });
+  });
+
+  it("returns null and still restarts/renders the TUI when the editor reports no edit", async () => {
+    editInExternalEditorMock.mockResolvedValue(null);
+    const driver = makeDriver();
+
+    const result = await editBlock(driver.ctx, block);
+
+    expect(result).toBeNull();
+    expect(driver.tuiStopCount).toBe(1);
+    expect(driver.tuiStartCount).toBe(1);
+    expect(driver.tuiRequestRenderCalls).toEqual([true]);
+  });
+
+  it("returns null and still restarts/renders the TUI when the helper throws", async () => {
+    editInExternalEditorMock.mockRejectedValue(new Error("boom"));
+    const driver = makeDriver();
+
+    const result = await editBlock(driver.ctx, block);
+
+    expect(result).toBeNull();
+    expect(driver.tuiStopCount).toBe(1);
+    expect(driver.tuiStartCount).toBe(1);
+    expect(driver.tuiRequestRenderCalls).toEqual([true]);
+  });
+
+  it("resolves null without launching the editor when tui.stop() throws", async () => {
+    editInExternalEditorMock.mockResolvedValue("echo updated");
+    const driver = makeDriver({
+      stop: () => {
+        throw new Error("stop failed");
+      },
+    });
+
+    const result = await editBlock(driver.ctx, block);
+
+    expect(result).toBeNull();
+    expect(editInExternalEditorMock).not.toHaveBeenCalled();
+  });
+
+  it("still resolves with the computed edit outcome when tui.start() throws after a successful edit", async () => {
+    editInExternalEditorMock.mockResolvedValue("echo updated");
+    const driver = makeDriver({
+      start: () => {
+        throw new Error("start failed");
+      },
+    });
+
+    const result = await editBlock(driver.ctx, block);
+
+    expect(result).toEqual({ tag: "bash", contents: "echo updated" });
+  });
+
+  it("still resolves with the computed edit outcome when tui.requestRender() throws after a successful edit", async () => {
+    editInExternalEditorMock.mockResolvedValue("echo updated");
+    const driver = makeDriver({
+      requestRender: () => {
+        throw new Error("render failed");
+      },
+    });
+
+    const result = await editBlock(driver.ctx, block);
+
+    expect(result).toEqual({ tag: "bash", contents: "echo updated" });
   });
 });
 

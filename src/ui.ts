@@ -1,14 +1,17 @@
 /**
  * Picker, confirmation, editing, and result UI for code block invocation.
  *
- * All four exported functions delegate to ctx.ui.custom() or ctx.ui.editor()
- * and produce no side effects on the agent context.
+ * All four exported functions delegate to ctx.ui.custom() and produce no
+ * side effects on the agent context. editBlock uses ctx.ui.custom() only to
+ * access the TUI so it can stop/restart it around a directly-launched
+ * external editor — it never calls ctx.ui.editor().
  */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { decodeKittyPrintable, Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { FencedBlock } from "./blocks.js";
+import { editInExternalEditor } from "./editor.js";
 import type { ExecuteResult } from "./executor.js";
 
 // ---------------------------------------------------------------------------
@@ -409,18 +412,63 @@ export function confirmBlock(ctx: ExtensionContext, block: FencedBlock): Promise
 // ---------------------------------------------------------------------------
 
 /**
- * Open a multi-line editor prefilled with the full contents of `block`.
+ * Launch an external editor directly on the full contents of `block`.
  *
- * Returns an updated block (same tag, edited contents) when the user saves,
- * or `null` when the editor is dismissed without saving.
+ * The TUI is stopped before the editor takes over the terminal and restarted
+ * (with a full render requested) once the editor exits, whether the edit
+ * succeeded, failed, or the helper threw.
  *
- * This function does NOT execute or confirm the result — task 5 always calls
- * `confirmBlock` again after `editBlock`.
+ * Returns an updated block (same tag, edited contents) on a clean exit, or
+ * `null` when the editor could not be launched, exited nonzero, or threw.
+ *
+ * This function does NOT execute or confirm the result — invokeFlow always
+ * calls `confirmBlock` again after `editBlock`.
  */
 export async function editBlock(ctx: ExtensionContext, block: FencedBlock): Promise<FencedBlock | null> {
-  const result = await ctx.ui.editor(`Edit [${block.tag}] block`, block.contents);
-  if (result === undefined) return null;
-  return { tag: block.tag, contents: result };
+  return ctx.ui.custom<FencedBlock | null>((tui, _theme, _keybindings, done) => {
+    void (async () => {
+      let outcome: FencedBlock | null = null;
+      let stopped = false;
+
+      try {
+        tui.stop();
+        stopped = true;
+      } catch {
+        stopped = false;
+      }
+
+      if (stopped) {
+        try {
+          const content = await editInExternalEditor(block.contents, block.tag);
+          outcome = content === null ? null : { tag: block.tag, contents: content };
+        } catch {
+          outcome = null;
+        }
+
+        // Recovery is best effort: a throw here must not discard the
+        // already-computed edit outcome or leave done() uncalled.
+        try {
+          tui.start();
+        } catch {
+          // best effort
+        }
+        try {
+          tui.requestRender(true);
+        } catch {
+          // best effort
+        }
+      }
+
+      done(outcome);
+    })();
+
+    const component: Component = {
+      render: () => [],
+      handleInput: () => {},
+      invalidate: () => {},
+    };
+    return component;
+  });
 }
 
 // ---------------------------------------------------------------------------

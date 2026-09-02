@@ -140,7 +140,12 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
 
     if (action === "edit") {
       const edited = await editBlock(ctx, block);
-      if (edited === null) return; // editor dismissed → return
+      if (edited === null) {
+        // Editor launch failed, exited nonzero, or was otherwise dismissed —
+        // loop back to confirmBlock with the unchanged current block. Do not
+        // execute or report.
+        continue;
+      }
       block = edited;
       // Loop back to confirmBlock with the edited block.
       continue;
