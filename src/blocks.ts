@@ -9,22 +9,39 @@ export interface FencedBlock {
 }
 
 // Matches an opening fence line:
-//   group 1 — fence run (3+ identical backticks or tildes)
-//   group 2 — info string (first non-whitespace word); fails if empty or multi-word
-const OPENING_FENCE_RE = /^(`{3,}|~{3,})(\S+)\s*$/;
+//   group 1 — leading indentation (0–3 ASCII spaces, CommonMark-style)
+//   group 2 — fence run (3+ identical backticks or tildes)
+//   group 3 — info string (first non-whitespace word); fails if empty or multi-word
+const OPENING_FENCE_RE = /^( {0,3})(`{3,}|~{3,})(\S+)\s*$/;
 
 /**
  * Returns true when `line` is a valid closing fence for a fence opened with
- * `fenceChar` repeated `minLen` times.  Trailing whitespace on the line is
+ * `fenceChar` repeated `minLen` times.  Up to 3 leading ASCII spaces are
+ * allowed (CommonMark-style), and trailing whitespace on the line is
  * ignored; the remaining characters must all be `fenceChar`.
  */
 function isClosingFence(line: string, fenceChar: string, minLen: number): boolean {
-  const trimmed = line.trimEnd();
+  const leadingSpacesMatch = /^ {0,3}/.exec(line);
+  const afterIndent = line.slice(leadingSpacesMatch === null ? 0 : leadingSpacesMatch[0].length);
+  const trimmed = afterIndent.trimEnd();
   if (trimmed.length < minLen) return false;
   for (const ch of trimmed) {
     if (ch !== fenceChar) return false;
   }
   return true;
+}
+
+/**
+ * Removes up to `indent.length` leading ASCII spaces from `line`, stopping
+ * early if `line` has fewer leading spaces than `indent`.  Any additional
+ * indentation beyond `indent.length` is preserved.
+ */
+function dedent(line: string, indent: string): string {
+  let i = 0;
+  while (i < indent.length && i < line.length && line[i] === " ") {
+    i++;
+  }
+  return line.slice(i);
 }
 
 /**
@@ -53,8 +70,9 @@ export function extractFencedBlocks(markdown: string): FencedBlock[] {
       continue;
     }
 
-    const fenceRun = openMatch[1];
-    const tag = openMatch[2];
+    const indent = openMatch[1];
+    const fenceRun = openMatch[2];
+    const tag = openMatch[3];
     const fenceChar = fenceRun[0];
     const fenceLen = fenceRun.length;
 
@@ -74,7 +92,7 @@ export function extractFencedBlocks(markdown: string): FencedBlock[] {
         break;
       }
 
-      contentLines.push(contentLine);
+      contentLines.push(dedent(contentLine, indent));
       i++;
     }
 

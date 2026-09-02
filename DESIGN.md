@@ -16,6 +16,8 @@ Executes whole blocks only. Per-line selection, partial extraction, and inline c
 
 When the command fires, the extension scans the latest assistant message for fenced blocks whose opening fence carries a recognized tag. Each qualifying block is collected in document order along with its tag and full contents.
 
+Opening and closing fences may carry 0–3 leading spaces, per CommonMark, including fences nested under list items. Content lines are dedented by up to the opening fence's indentation before being collected — block contents are not treated as byte-for-byte verbatim when the fence itself is indented.
+
 If no qualifying block is found, the command reports this and exits.
 
 ## Selection and Confirmation

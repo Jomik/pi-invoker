@@ -218,6 +218,46 @@ describe("content preservation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Indented fences (CommonMark-style, 0–3 leading spaces)
+// ---------------------------------------------------------------------------
+
+describe("indented fences", () => {
+  it("extracts a three-space-indented bash block inside a numbered list", () => {
+    const md = ["1. Run this:", "", "   ```bash", "   echo hi", "   ```"].join("\n");
+    const blocks = extractFencedBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.tag).toBe("bash");
+    expect(blocks[0]?.contents).toBe("echo hi");
+  });
+
+  it("dedents content by the opening fence's indentation, preserving extra indentation", () => {
+    const md = ["   ```bash", "   echo hi", "     extra indented", "   ```"].join("\n");
+    const blocks = extractFencedBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.contents).toBe("echo hi\n  extra indented");
+  });
+
+  it("dedents a content line with less indentation than the fence by only what is present", () => {
+    const md = ["   ```bash", " echo hi", "   ```"].join("\n");
+    const blocks = extractFencedBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.contents).toBe("echo hi");
+  });
+
+  it("does not recognize a fence indented by 4+ spaces", () => {
+    const md = ["    ```bash", "    echo hi", "    ```"].join("\n");
+    expect(extractFencedBlocks(md)).toHaveLength(0);
+  });
+
+  it("preserves existing column-zero behavior", () => {
+    const md = "```bash\necho hi\n```";
+    const blocks = extractFencedBlocks(md);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]?.contents).toBe("echo hi");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Unclosed / malformed fences
 // ---------------------------------------------------------------------------
 
