@@ -1,6 +1,6 @@
 {
   "name": "pi-invoker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi extension to invoke fenced code blocks from assistant messages",
   "license": "MIT",
   "author": "Jonas Damtoft",
