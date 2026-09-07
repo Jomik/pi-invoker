@@ -28,6 +28,12 @@ import {
 } from "./report.js";
 import { confirmBlock, editBlock, pickBlock, showExecutionResult } from "./ui.js";
 
+/**
+ * Stable ctx.ui.setStatus key used to publish the transient "running" status
+ * while a block's execution is pending.
+ */
+const STATUS_KEY = "pi-invoker";
+
 // ---------------------------------------------------------------------------
 // Extension factory
 // ---------------------------------------------------------------------------
@@ -167,10 +173,13 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
     const finalBlock = block; // capture for the confirmation loop
     let result: ExecuteResult;
     try {
+      ctx.ui.setStatus(STATUS_KEY, `Running [${finalBlock.tag}]…`);
       result = await executeBlock(descriptor, finalBlock.contents, ctx.cwd);
     } catch (err) {
       ctx.ui.notify(`Execution failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
+    } finally {
+      ctx.ui.setStatus(STATUS_KEY, undefined);
     }
 
     // 7. Deliver based on mode:

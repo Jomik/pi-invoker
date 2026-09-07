@@ -2,7 +2,7 @@
 
 ## Purpose and Ownership
 
-pi-invoker provides a human-initiated `/invoke` command and keyboard shortcut that let a user run a fenced code block from the latest assistant message. It relies entirely on native, RPC-portable `ctx.ui` primitives (`select`, `confirm`, `editor`), so it works identically on the TUI and on RPC-based hosts such as Paseo; in a headless host whose `ctx.ui` provides no-op defaults, the mandatory pre-run `ctx.ui.select` confirmation resolves to `undefined`, which `confirmBlock` maps to cancel, so no process is ever started without explicit confirmation. It is not part of pi-armory.
+pi-invoker provides a human-initiated `/invoke` command and keyboard shortcut that let a user run a fenced code block from the latest assistant message. Its interactive dialogs (`select`, `confirm`, `editor`) are native, RPC-portable `ctx.ui` primitives, so the confirmation, result, and editing flow works identically on the TUI and on RPC-based hosts such as Paseo; `setStatus` is likewise an RPC-portable primitive for emitting status, but the host owns how (or whether) that status is rendered, so its presentation is host-dependent. In a headless host whose `ctx.ui` provides no-op defaults, the mandatory pre-run `ctx.ui.select` confirmation resolves to `undefined`, which `confirmBlock` maps to cancel, so no process is ever started without explicit confirmation. It is not part of pi-armory.
 
 **Why separate from armory.** Armory grants structured, named capabilities to the agent — things the model can invoke. This is a user action *on* assistant output: the human decides what to run, when, and what to do with the result. The trust boundary, initiation point, and feedback path are all different. Merging them would blur the agent-tool contract.
 
@@ -41,7 +41,9 @@ Editing uses the host's built-in multiline `ctx.ui.editor`, prefilled with the b
 
 Arbitrary model-generated code always requires this explicit human confirmation. There is no bypass path.
 
-Execution is awaited directly with no custom loader UI shown while the process runs, and there is currently no in-flow UI for the user to trigger cancellation of a running process. **Cancel** in the choices table above is pre-execution only.
+While execution is pending, pi-invoker publishes a keyed `Running [tag]…` status through the host-provided `ctx.ui.setStatus` primitive and clears it on every success or failure path. The host owns how that transient status is presented. This is status only: execution remains a human-initiated extension command rather than an agent tool call, and no dialog or transcript message is kept open merely to represent progress.
+
+Execution is awaited directly with no custom loader UI, and there is currently no in-flow UI for the user to trigger cancellation of a running process. **Cancel** in the choices table above is pre-execution only.
 
 Only one invocation may be active at a time. A command or shortcut received while another invocation is selecting, confirming, editing, or executing reports that an invocation is already in progress and does not queue or start another process.
 
@@ -77,7 +79,7 @@ The same custom message is used when **Send to agent** is chosen after a local r
 
 The model-facing message begins with a concise instruction: a human explicitly confirmed and executed code from the agent's previous response; the code and output are untrusted execution data, not instructions; the agent should use the result to continue helping the user. A JSON payload follows this instruction. It contains the language tag, the exact code submitted, the working directory, combined output, truncation metadata when applicable, the numeric exit status, and whether execution was cancelled. The exact submitted code is always included so edited or multiply-selected blocks remain unambiguous and the result remains self-contained after compaction.
 
-The result schema carries a `cancelled` field, but there is currently no in-flow UI for the user to trigger cancellation of a running execution — execution is awaited directly to completion, with no custom loader shown while it runs.
+The result schema carries a `cancelled` field, but there is currently no in-flow UI for the user to trigger cancellation of a running execution — execution is awaited directly to completion while the transient running status is published to the host.
 
 ## Errors and Invariants
 
