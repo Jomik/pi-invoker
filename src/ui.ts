@@ -33,22 +33,13 @@ function buildPreview(block: FencedBlock): string {
   return firstLine ?? "(empty)";
 }
 
-/** Build a per-block picker label; disambiguated below when duplicates occur. */
-function buildLabel(block: FencedBlock): string {
-  return `[${block.tag}] ${buildPreview(block)}`;
-}
-
 /**
- * Makes an array of labels unique while preserving order, appending a
- * " (n)" suffix to the 2nd and later occurrences of a duplicate label.
+ * Build a per-block picker label, prefixed with its 1-based document index.
+ * The index prefix guarantees uniqueness regardless of tag/preview content,
+ * so selection can be mapped back to the exact block deterministically.
  */
-function disambiguate(labels: string[]): string[] {
-  const seen = new Map<string, number>();
-  return labels.map((label) => {
-    const count = (seen.get(label) ?? 0) + 1;
-    seen.set(label, count);
-    return count === 1 ? label : `${label} (${count})`;
-  });
+function buildLabel(block: FencedBlock, index: number): string {
+  return `${index + 1}. [${block.tag}] ${buildPreview(block)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,13 +50,14 @@ function disambiguate(labels: string[]): string[] {
  * Show a selector for the given blocks via ctx.ui.select().
  *
  * - Blocks appear in document order.
- * - Each option shows the tag and a single-line content preview; duplicate
- *   labels are disambiguated so selection maps back to the correct block.
+ * - Each option shows its 1-based document index, tag, and a single-line
+ *   content preview; the index prefix guarantees unique labels, so
+ *   selection maps back to the exact block deterministically.
  *
  * Returns the selected block, or `null` on cancel/dismissal.
  */
 export async function pickBlock(ctx: ExtensionContext, blocks: FencedBlock[]): Promise<FencedBlock | null> {
-  const labels = disambiguate(blocks.map(buildLabel));
+  const labels = blocks.map((block, index) => buildLabel(block, index));
   const choice = await ctx.ui.select("Select block", labels);
   if (choice === undefined) return null;
   const index = labels.indexOf(choice);

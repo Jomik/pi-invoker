@@ -60,10 +60,13 @@ describe("pickBlock", () => {
     expect(selectMock).toHaveBeenCalledOnce();
     const [, options] = selectMock.mock.calls[0] as [string, string[]];
     expect(options).toHaveLength(3);
+    expect(options[0]).toContain("1.");
     expect(options[0]).toContain("[bash]");
     expect(options[0]).toContain("echo hello");
+    expect(options[1]).toContain("2.");
     expect(options[1]).toContain("[python]");
     expect(options[1]).toContain("print('world')");
+    expect(options[2]).toContain("3.");
     expect(options[2]).toContain("[ts]");
     expect(options[2]).toContain("const x = 1;");
   });
@@ -84,7 +87,7 @@ describe("pickBlock", () => {
     expect(selected).toBeNull();
   });
 
-  it("disambiguates duplicate tags/previews so each label maps to the correct block", async () => {
+  it("keeps labels unique and maps selection to the exact block even with duplicate tags/previews", async () => {
     const dupBlocks: FencedBlock[] = [
       { tag: "bash", contents: "echo same" },
       { tag: "bash", contents: "echo same" },
@@ -97,10 +100,28 @@ describe("pickBlock", () => {
     // All labels must be unique.
     expect(new Set(options).size).toBe(3);
 
-    // Selecting the third (disambiguated) label resolves to the third block object.
+    // Selecting the third label resolves to the exact third block object.
     const { ctx: ctx2 } = makeCtx({ select: async (_title, opts) => opts[2] });
     const selected = await pickBlock(ctx2, dupBlocks);
     expect(selected).toBe(dupBlocks[2]);
+  });
+
+  it("does not collide when a natural label already ends in a disambiguation-like suffix", async () => {
+    const collidingBlocks: FencedBlock[] = [
+      { tag: "bash", contents: "echo same (2)" },
+      { tag: "bash", contents: "echo same" },
+    ];
+    const { ctx, selectMock } = makeCtx();
+    void pickBlock(ctx, collidingBlocks);
+
+    const [, options] = selectMock.mock.calls[0] as [string, string[]];
+    expect(new Set(options).size).toBe(2);
+
+    // Selecting the first option (whose preview naturally ends in "(2)")
+    // must resolve to the first block, not the second.
+    const { ctx: ctx2 } = makeCtx({ select: async (_title, opts) => opts[0] });
+    const selected = await pickBlock(ctx2, collidingBlocks);
+    expect(selected).toBe(collidingBlocks[0]);
   });
 });
 
