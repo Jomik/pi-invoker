@@ -17,7 +17,6 @@
  */
 
 import type { ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader } from "@earendil-works/pi-coding-agent";
 import { extractFencedBlocks, type FencedBlock } from "./blocks.js";
 import { type ExecuteResult, executeBlock } from "./executor.js";
 import { MissingInterpreterError, resolveInterpreter, UnsupportedRuntimeError } from "./interpreters.js";
@@ -96,9 +95,9 @@ export type DeliverInvocationMessage = (message: {
  * @param deliverMessage  - Sends a custom invocation-result message to Pi.
  */
 export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverInvocationMessage): Promise<void> {
-  // 1. Require TUI mode; explicit error for other modes.
-  if (ctx.mode !== "tui") {
-    ctx.ui.notify("/invoke is only available in TUI mode.", "error");
+  // 1. Require a UI-capable host; explicit error for headless modes.
+  if (!ctx.hasUI) {
+    ctx.ui.notify("/invoke requires a UI-capable host (tui or rpc).", "error");
     return;
   }
 
@@ -169,34 +168,18 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
       return;
     }
 
-    // 7. Execute inside ctx.ui.custom with a cancellable BorderedLoader.
-    //    On success, done() receives the ExecuteResult.
-    //    On unexpected rejection, done() receives the Error so the loader
-    //    closes cleanly without hanging.
-    const finalBlock = block; // capture for the factory closure
-    const result = await ctx.ui.custom<ExecuteResult | Error>((tui, theme, _keybindings, done) => {
-      const loader = new BorderedLoader(tui, theme, `Running [${finalBlock.tag}]…`, { cancellable: true });
-
-      // Start execution immediately; close loader when execution settles.
-      void executeBlock(descriptor, finalBlock.contents, ctx.cwd, loader.signal).then(
-        (execResult) => {
-          done(execResult);
-        },
-        (err: unknown) => {
-          done(err instanceof Error ? err : new Error(String(err)));
-        },
-      );
-
-      return loader;
-    });
-
-    // 8. If executeBlock rejected, notify and bail out — no result display or report.
-    if (result instanceof Error) {
-      ctx.ui.notify(`Execution failed: ${result.message}`, "error");
+    // 7. Execute directly. On rejection, notify and bail out — no result
+    //    display or report.
+    const finalBlock = block; // capture for the confirmation loop
+    let result: ExecuteResult;
+    try {
+      result = await executeBlock(descriptor, finalBlock.contents, ctx.cwd);
+    } catch (err) {
+      ctx.ui.notify(`Execution failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     }
 
-    // 9. Deliver based on mode:
+    // 8. Deliver based on mode:
     //    - run-and-report: send the invocation message immediately (no inline
     //      result panel).
     //    - run-locally: show the inline result panel; only send if user picks

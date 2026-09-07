@@ -37,37 +37,6 @@ vi.mock("../src/ui.js", () => ({
   showExecutionResult: vi.fn(),
 }));
 
-// Mock BorderedLoader from the Pi package.
-const hoisted = vi.hoisted(() => {
-  class FakeBorderedLoader {
-    private controller = new AbortController();
-
-    get signal(): AbortSignal {
-      return this.controller.signal;
-    }
-
-    render(_width: number): string[] {
-      return [];
-    }
-
-    handleInput(_data: string): void {}
-
-    invalidate(): void {}
-
-    dispose(): void {}
-  }
-
-  return { FakeBorderedLoader };
-});
-
-vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
-  return {
-    ...actual,
-    BorderedLoader: hoisted.FakeBorderedLoader,
-  };
-});
-
 // ---------------------------------------------------------------------------
 // Imports (after mocks are set up)
 // ---------------------------------------------------------------------------
@@ -119,12 +88,14 @@ interface NotifyCall {
 
 interface FakeCtxOptions {
   mode?: string;
+  hasUI?: boolean;
   branch?: unknown[];
   isIdleNow?: boolean;
 }
 
 function makeFakeCtx(options: FakeCtxOptions = {}) {
   const mode = options.mode ?? "tui";
+  const hasUI = options.hasUI ?? true;
   // Default: one assistant message entry with a bash block
   const branch = options.branch ?? [
     {
@@ -153,11 +124,11 @@ function makeFakeCtx(options: FakeCtxOptions = {}) {
   ];
 
   const notifyCalls: NotifyCall[] = [];
-  let customDoneRef: ((result: unknown) => void) | null = null;
 
   // biome-ignore lint/suspicious/noExplicitAny: test-only fake
   const ctx: any = {
     mode,
+    hasUI,
     cwd: "/project",
     sessionManager: {
       getBranch: () => branch,
@@ -168,35 +139,10 @@ function makeFakeCtx(options: FakeCtxOptions = {}) {
       notify: vi.fn((message: string, type?: string) => {
         notifyCalls.push({ message, type });
       }),
-      custom: vi.fn(async (factory: unknown) => {
-        // Invoke the factory, capturing done; resolve when done is called.
-        return new Promise((resolve) => {
-          const f = factory as (
-            tui: unknown,
-            theme: unknown,
-            keybindings: unknown,
-            done: (result: unknown) => void,
-          ) => unknown;
-          customDoneRef = resolve;
-          f(
-            {}, // fake tui
-            { fg: (_: unknown, s: string) => s }, // fake theme
-            {}, // fake keybindings
-            resolve,
-          );
-        });
-      }),
     },
   };
 
-  return {
-    ctx,
-    notifyCalls,
-    get customDone(): (result: unknown) => void {
-      if (!customDoneRef) throw new Error("ui.custom was not called yet");
-      return customDoneRef;
-    },
-  };
+  return { ctx, notifyCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -230,12 +176,12 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// 1. Non-TUI mode guard
+// 1. UI-capability guard
 // ---------------------------------------------------------------------------
 
-describe("invokeFlow — non-TUI mode", () => {
-  it("notifies with an error and returns without extracting blocks", async () => {
-    const { ctx, notifyCalls } = makeFakeCtx({ mode: "rpc" });
+describe("invokeFlow — UI capability guard", () => {
+  it("notifies with an error and returns without extracting blocks when hasUI is false", async () => {
+    const { ctx, notifyCalls } = makeFakeCtx({ mode: "json", hasUI: false });
     const { deliverMessage } = makeDeliveryCallback();
 
     await invokeFlow(ctx, deliverMessage);
@@ -246,13 +192,28 @@ describe("invokeFlow — non-TUI mode", () => {
     expect(mockExecuteBlock).not.toHaveBeenCalled();
   });
 
-  it("exits early in non-TUI mode without attempting execution", async () => {
-    const { ctx } = makeFakeCtx({ mode: "json" });
+  it("exits early in a UI-less mode without attempting execution", async () => {
+    const { ctx } = makeFakeCtx({ mode: "print", hasUI: false });
     const { deliverMessage } = makeDeliveryCallback();
 
     await invokeFlow(ctx, deliverMessage);
 
     expect(mockExecuteBlock).not.toHaveBeenCalled();
+  });
+
+  it("completes an invocation when mode is rpc and hasUI is true", async () => {
+    const { ctx } = makeFakeCtx({ mode: "rpc", hasUI: true });
+    const { deliverMessage, calls } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(mockExecuteBlock).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(1);
+    // No custom UI call is needed to complete the invocation.
+    expect(ctx.ui.custom).toBeUndefined();
   });
 });
 
@@ -320,11 +281,12 @@ describe("extension factory — registration", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: getBranchSpy },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       isIdle: () => true,
-      ui: { notify: vi.fn(), custom: vi.fn() },
+      ui: { notify: vi.fn() },
     };
 
     const invokeHandler = registeredCommands.invoke;
@@ -346,6 +308,7 @@ describe("extension factory — registration", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const busyCtx: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       isIdle: () => false, // busy
@@ -353,7 +316,6 @@ describe("extension factory — registration", () => {
         notify: vi.fn((message: string, type?: string) => {
           notifyCalls.push({ message, type });
         }),
-        custom: vi.fn(),
       },
     };
 
@@ -422,13 +384,13 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx1: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       waitForIdle: vi.fn().mockReturnValue(idlePromise),
       isIdle: () => true,
       ui: {
         notify: vi.fn((m: string, t?: string) => notifyCalls1.push({ message: m, type: t })),
-        custom: vi.fn(),
       },
     };
 
@@ -436,13 +398,13 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       isIdle: () => true,
       ui: {
         notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
-        custom: vi.fn(),
       },
     };
 
@@ -489,23 +451,24 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx1: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       waitForIdle: vi.fn().mockReturnValue(idlePromise),
       isIdle: () => true,
-      ui: { notify: vi.fn(), custom: vi.fn() },
+      ui: { notify: vi.fn() },
     };
 
     const notifyCalls2: { message: string; type?: string }[] = [];
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       isIdle: () => true,
       ui: {
         notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
-        custom: vi.fn(),
       },
     };
 
@@ -542,13 +505,13 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: ctx1.sessionManager.getBranch },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       isIdle: () => true,
       ui: {
         notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
-        custom: vi.fn(),
       },
     };
     mockConfirmBlock.mockResolvedValueOnce("cancel");
@@ -579,13 +542,13 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
+      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: ctx1.sessionManager.getBranch },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
       isIdle: () => true,
       ui: {
         notify: vi.fn((m: string, t?: string) => notifyCalls2.push({ message: m, type: t })),
-        custom: vi.fn(),
       },
     };
     mockConfirmBlock.mockResolvedValueOnce("cancel");
@@ -1076,26 +1039,7 @@ describe("invokeFlow — interpreter errors", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 10. Loader signal passed to executeBlock
-// ---------------------------------------------------------------------------
-
-describe("invokeFlow — loader signal", () => {
-  it("executeBlock receives an AbortSignal from the loader", async () => {
-    const { ctx } = makeFakeCtx();
-    const { deliverMessage } = makeDeliveryCallback();
-
-    mockConfirmBlock.mockResolvedValue("run-locally");
-    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
-
-    await invokeFlow(ctx, deliverMessage);
-
-    const signalArg = mockExecuteBlock.mock.calls[0]?.[3];
-    expect(signalArg).toBeInstanceOf(AbortSignal);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 10b. executeBlock rejection — loader closes, error notified, no delivery
+// 10. executeBlock rejection — error notified, no delivery
 // ---------------------------------------------------------------------------
 
 describe("invokeFlow — executeBlock rejection", () => {
