@@ -37,7 +37,7 @@ Before execution, the selected block is shown via a native `ctx.ui.select` promp
 
 Dismissing the confirmation prompt is treated as **Cancel**. Both the confirmation and result prompts are native, RPC-portable `ctx.ui` primitives (`select` / `confirm`) rather than custom `ctx.ui.custom` dialogs, so the same flow works identically in the TUI and in RPC hosts such as Paseo; they always convey the block's complete code text and the result's retained output text, with no separate scrolling or paging mechanism of their own.
 
-Editing uses the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents — there is no external editor process, no temporary script file, and no TUI stop/restart. Dismissing the editor (resolves with `undefined`) discards the edit and returns to confirmation unchanged; otherwise the edited contents (which may be empty) replace the block's contents and confirmation is required again.
+Editing uses the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents. pi-invoker delegates editing entirely to this host-provided, RPC-portable primitive and no longer implements or owns an external editor process, temporary script file, or TUI lifecycle; host-specific editor capabilities (e.g. the TUI's Ctrl+G binding) may still invoke an external editor under the hood, but that is the host's concern, not pi-invoker's. Dismissing the editor (resolves with `undefined`) discards the edit and returns to confirmation unchanged; otherwise the edited contents (which may be empty) replace the block's contents and confirmation is required again.
 
 Arbitrary model-generated code always requires this explicit human confirmation. There is no bypass path.
 

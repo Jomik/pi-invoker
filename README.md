@@ -46,7 +46,7 @@ Dismissing the prompt is treated as **Cancel**. Confirmation is unconditional â€
 
 ### Editing
 
-**Edit before running** opens the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents. There is no external editor process, no temporary script file, and no TUI stop/restart. Dismissing the editor discards the edit and returns to confirmation unchanged. Otherwise, the edited contents replace the block's contents (an empty string is a valid edit) and **confirmation is required again** with the edited code. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts.
+**Edit before running** opens the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents. pi-invoker delegates editing entirely to this host-provided primitive and no longer implements or owns an external editor process, temporary script file, or TUI lifecycle; depending on the host, `ctx.ui.editor` may itself invoke an external editor (e.g. via a host-specific capability). Dismissing the editor discards the edit and returns to confirmation unchanged. Otherwise, the edited contents replace the block's contents (an empty string is a valid edit) and **confirmation is required again** with the edited code. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts.
 
 ### Result display
 
