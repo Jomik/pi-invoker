@@ -1,6 +1,6 @@
 # pi-invoker
 
-A [Pi](https://github.com/Earendil-Works/pi) extension that lets you run fenced code blocks from the latest assistant message. Works in any UI-capable Pi host — the TUI and RPC-based hosts such as Paseo. JSON, print, and other headless (non-UI) contexts are rejected.
+A [Pi](https://github.com/Earendil-Works/pi) extension that lets you run fenced code blocks from the latest assistant message. Works with any Pi host that provides `ctx.ui` — the TUI and RPC-based hosts such as Paseo.
 
 > **Security notice.** Confirmed code runs as your user with full access to your filesystem, network, and environment. There is no sandboxing or shell isolation. Review every block before confirming.
 
@@ -107,7 +107,6 @@ The model-facing payload includes:
 
 | Condition | Behavior |
 |---|---|
-| Non-UI host (e.g. JSON/print/headless) | Error notification; no process started. |
 | Missing interpreter | Error notification; no process started. |
 | TypeScript on Node < 22.19 | `UnsupportedRuntimeError`; no process started. |
 | Non-zero exit status | Surfaced explicitly; never silently ignored. |

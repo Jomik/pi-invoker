@@ -88,14 +88,12 @@ interface NotifyCall {
 
 interface FakeCtxOptions {
   mode?: string;
-  hasUI?: boolean;
   branch?: unknown[];
   isIdleNow?: boolean;
 }
 
 function makeFakeCtx(options: FakeCtxOptions = {}) {
   const mode = options.mode ?? "tui";
-  const hasUI = options.hasUI ?? true;
   // Default: one assistant message entry with a bash block
   const branch = options.branch ?? [
     {
@@ -128,7 +126,6 @@ function makeFakeCtx(options: FakeCtxOptions = {}) {
   // biome-ignore lint/suspicious/noExplicitAny: test-only fake
   const ctx: any = {
     mode,
-    hasUI,
     cwd: "/project",
     sessionManager: {
       getBranch: () => branch,
@@ -176,33 +173,12 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// 1. UI-capability guard
+// 1. RPC mode
 // ---------------------------------------------------------------------------
 
-describe("invokeFlow — UI capability guard", () => {
-  it("notifies with an error and returns without extracting blocks when hasUI is false", async () => {
-    const { ctx, notifyCalls } = makeFakeCtx({ mode: "json", hasUI: false });
-    const { deliverMessage } = makeDeliveryCallback();
-
-    await invokeFlow(ctx, deliverMessage);
-
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyCalls[0]?.type).toBe("error");
-    // No execution attempted
-    expect(mockExecuteBlock).not.toHaveBeenCalled();
-  });
-
-  it("exits early in a UI-less mode without attempting execution", async () => {
-    const { ctx } = makeFakeCtx({ mode: "print", hasUI: false });
-    const { deliverMessage } = makeDeliveryCallback();
-
-    await invokeFlow(ctx, deliverMessage);
-
-    expect(mockExecuteBlock).not.toHaveBeenCalled();
-  });
-
-  it("completes an invocation when mode is rpc and hasUI is true", async () => {
-    const { ctx } = makeFakeCtx({ mode: "rpc", hasUI: true });
+describe("invokeFlow — rpc mode", () => {
+  it("completes an invocation when mode is rpc", async () => {
+    const { ctx } = makeFakeCtx({ mode: "rpc" });
     const { deliverMessage, calls } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-and-report");
@@ -281,7 +257,6 @@ describe("extension factory — registration", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: getBranchSpy },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
@@ -308,7 +283,6 @@ describe("extension factory — registration", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const busyCtx: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       isIdle: () => false, // busy
@@ -384,7 +358,6 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx1: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       waitForIdle: vi.fn().mockReturnValue(idlePromise),
@@ -398,7 +371,6 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
@@ -451,7 +423,6 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx1: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       waitForIdle: vi.fn().mockReturnValue(idlePromise),
@@ -463,7 +434,6 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: vi.fn().mockReturnValue([]) },
       isIdle: () => true,
@@ -505,7 +475,6 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: ctx1.sessionManager.getBranch },
       waitForIdle: vi.fn().mockResolvedValue(undefined),
@@ -542,7 +511,6 @@ describe("extension factory — active-invocation guard", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test-only fake
     const ctx2: any = {
       mode: "tui",
-      hasUI: true,
       cwd: "/project",
       sessionManager: { getBranch: ctx1.sessionManager.getBranch },
       waitForIdle: vi.fn().mockResolvedValue(undefined),

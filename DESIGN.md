@@ -2,7 +2,7 @@
 
 ## Purpose and Ownership
 
-pi-invoker provides a human-initiated `/invoke` command and keyboard shortcut that let a user run a fenced code block from the latest assistant message. It requires a UI-capable Pi host — the TUI or an RPC-based host such as Paseo — and is rejected in headless (JSON/print) contexts. It is not part of pi-armory.
+pi-invoker provides a human-initiated `/invoke` command and keyboard shortcut that let a user run a fenced code block from the latest assistant message. It relies entirely on native, RPC-portable `ctx.ui` primitives (`select`, `confirm`, `editor`), so it works identically on the TUI and on RPC-based hosts such as Paseo; in a headless host whose `ctx.ui` provides no-op defaults, the mandatory pre-run `ctx.ui.select` confirmation resolves to `undefined`, which `confirmBlock` maps to cancel, so no process is ever started without explicit confirmation. It is not part of pi-armory.
 
 **Why separate from armory.** Armory grants structured, named capabilities to the agent — things the model can invoke. This is a user action *on* assistant output: the human decides what to run, when, and what to do with the result. The trust boundary, initiation point, and feedback path are all different. Merging them would blur the agent-tool contract.
 

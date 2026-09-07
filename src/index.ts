@@ -95,27 +95,21 @@ export type DeliverInvocationMessage = (message: {
  * @param deliverMessage  - Sends a custom invocation-result message to Pi.
  */
 export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverInvocationMessage): Promise<void> {
-  // 1. Require a UI-capable host; explicit error for headless modes.
-  if (!ctx.hasUI) {
-    ctx.ui.notify("/invoke requires a UI-capable host (tui or rpc).", "error");
-    return;
-  }
-
-  // 2. Locate the latest assistant message text.
+  // 1. Locate the latest assistant message text.
   const assistantText = extractLatestAssistantText(ctx);
   if (assistantText === null) {
     ctx.ui.notify("No assistant message found in the current session.", "warning");
     return;
   }
 
-  // 3. Extract recognized fenced code blocks.
+  // 2. Extract recognized fenced code blocks.
   const blocks = extractFencedBlocks(assistantText);
   if (blocks.length === 0) {
     ctx.ui.notify("No recognized code blocks found in the latest assistant message.", "info");
     return;
   }
 
-  // 4. If there is more than one block, show a picker; if there is exactly one,
+  // 3. If there is more than one block, show a picker; if there is exactly one,
   //    use it directly.
   let selectedBlock: FencedBlock;
   if (blocks.length === 1) {
@@ -128,7 +122,7 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
     selectedBlock = picked;
   }
 
-  // 5. Mandatory confirmation loop.
+  // 4. Mandatory confirmation loop.
   let block = selectedBlock;
   while (true) {
     const action = await confirmBlock(ctx, block);
@@ -153,7 +147,7 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
     // action is "run-locally" or "run-and-report"
     const deliverMode = action;
 
-    // 6. Resolve interpreter; surface errors without spawning.
+    // 5. Resolve interpreter; surface errors without spawning.
     let descriptor: ReturnType<typeof resolveInterpreter>;
     try {
       descriptor = resolveInterpreter(block.tag);
@@ -168,7 +162,7 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
       return;
     }
 
-    // 7. Execute directly. On rejection, notify and bail out — no result
+    // 6. Execute directly. On rejection, notify and bail out — no result
     //    display or report.
     const finalBlock = block; // capture for the confirmation loop
     let result: ExecuteResult;
@@ -179,7 +173,7 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
       return;
     }
 
-    // 8. Deliver based on mode:
+    // 7. Deliver based on mode:
     //    - run-and-report: send the invocation message immediately (no inline
     //      result panel).
     //    - run-locally: show the inline result panel; only send if user picks
