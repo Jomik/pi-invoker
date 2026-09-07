@@ -50,7 +50,7 @@ Dismissing the prompt is treated as **Cancel**. Confirmation is unconditional â€
 
 ### Result display
 
-**Run locally** shows the result via a native `ctx.ui.confirm` prompt. It displays the language tag, `exit 0` / `exit N` or `cancelled`, and the complete combined output. When output was tail-bounded the retained and total byte and line counts are also shown.
+**Run locally** shows the result via a native `ctx.ui.confirm` prompt. It displays the language tag, `exit 0` / `exit N` or `cancelled`, and the retained combined output. When output was tail-bounded, the retained and total byte and line counts are also shown.
 
 Confirming the prompt sends the result to the agent (**Send to agent**); declining or dismissing closes it without notifying the agent (**Close**):
 

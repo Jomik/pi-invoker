@@ -35,7 +35,7 @@ Before execution, the selected block is shown via a native `ctx.ui.select` promp
 | **Edit before running** | Open the block's contents in the host's built-in multiline `ctx.ui.editor`, prefilled with the current contents. The same four confirmation choices are shown again after a non-dismissed edit, and the user may edit repeatedly before execution. |
 | **Cancel** | Pre-execution dismissal: no process is started and no report is sent. |
 
-Dismissing the confirmation prompt is treated as **Cancel**. Both the confirmation and result prompts are native, RPC-portable `ctx.ui` primitives (`select` / `confirm`) rather than custom `ctx.ui.custom` dialogs, so the same flow works identically in the TUI and in RPC hosts such as Paseo; they always convey the complete code or output text, with no separate scrolling or paging mechanism of their own.
+Dismissing the confirmation prompt is treated as **Cancel**. Both the confirmation and result prompts are native, RPC-portable `ctx.ui` primitives (`select` / `confirm`) rather than custom `ctx.ui.custom` dialogs, so the same flow works identically in the TUI and in RPC hosts such as Paseo; they always convey the block's complete code text and the result's retained output text, with no separate scrolling or paging mechanism of their own.
 
 Editing uses the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents — there is no external editor process, no temporary script file, and no TUI stop/restart. Dismissing the editor (resolves with `undefined`) discards the edit and returns to confirmation unchanged; otherwise the edited contents (which may be empty) replace the block's contents and confirmation is required again.
 
@@ -71,7 +71,7 @@ Combined stdout and stderr are captured together. A bounded maximum output size 
 
 **Run locally.** Captured output and exit status are displayed via a native `ctx.ui.confirm` prompt. Confirming keeps the local result and additionally sends it to the agent (**Send to agent**); declining or dismissing keeps the result local only. Sending does not re-execute the block and triggers the next agent turn immediately.
 
-**Run and report.** No result prompt is shown after execution. The completed result is sent immediately as a custom extension message that participates in agent context but is distinct from a user prompt. This triggers the next agent turn. In the transcript, the message appears as a compact result card showing the language tag, status, and output size or truncation state; it omits the fixed working directory. The complete structured details are expandable.
+**Run and report.** No result prompt is shown after execution. The completed result is sent immediately as a custom extension message that participates in agent context but is distinct from a user prompt. This triggers the next agent turn. In the transcript, the message appears as a compact result card showing the language tag, status, and output size or truncation state; it omits the working directory, code, and output. Expanded details hold the full structured data.
 
 The same custom message is used when **Send to agent** is chosen after a local run. Its internal type identifies it to Pi for routing and rendering, but the extension name is not repeated in model-facing content.
 
