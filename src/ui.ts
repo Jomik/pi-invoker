@@ -121,7 +121,7 @@ export async function editBlock(ctx: ExtensionContext, block: FencedBlock): Prom
 /**
  * Display execution results via ctx.ui.confirm(), showing:
  * - Tag and exit status (zero/nonzero/cancelled).
- * - Complete combined output.
+ * - Retained combined output (may be truncated).
  * - When truncated: the retained/total byte and line counts.
  *
  * Returns `"send-to-agent"` when the user confirms, `"close"` otherwise
