@@ -1,6 +1,6 @@
 # pi-invoker
 
-A [Pi](https://github.com/Earendil-Works/pi) extension that lets you run fenced code blocks from the latest assistant message directly from the TUI.
+A [Pi](https://github.com/Earendil-Works/pi) extension that lets you run fenced code blocks from the latest assistant message. Works with any Pi host that provides `ctx.ui` — the TUI and RPC-based hosts such as Paseo.
 
 > **Security notice.** Confirmed code runs as your user with full access to your filesystem, network, and environment. There is no sandboxing or shell isolation. Review every block before confirming.
 
@@ -29,41 +29,37 @@ Only one invocation can be active at a time. A second command or shortcut issued
 
 ### Block selection
 
-If the latest assistant message contains a single recognized block it is presented immediately for confirmation. If it contains multiple blocks a searchable picker lists all of them (tag + content preview); select one to proceed.
+If the latest assistant message contains a single recognized block it is presented immediately for confirmation. If it contains multiple blocks, a native `ctx.ui.select` prompt lists all of them, one option per block, labeled with a 1-based document index, tag, and a single-line content preview (the block's first non-empty line, trimmed); select one to proceed. There is no custom search UI.
 
 ### Confirmation
 
-The full block is shown in a scrollable inline panel alongside four choices:
+The block is shown via a native `ctx.ui.select` prompt whose title is the block's tag and complete code, alongside four choices:
 
 | Choice | Meaning |
 |---|---|
-| **Run locally** | Execute; result shown in a scrollable inline panel. Can be closed or sent to the agent. |
+| **Run locally** | Execute; result shown via a native confirm prompt. Can be closed or sent to the agent. |
 | **Run and report** | Execute; send a structured result to the agent immediately, triggering the next agent turn. |
-| **Edit before running** | Open the block directly in an external editor (temporary script file, no confirmation panel involved). |
+| **Edit before running** | Open the block in the host's built-in multiline editor, then reconfirm. |
 | **Cancel** | Dismiss without starting any process. |
 
-The code panel is a bounded, fixed-height inline viewport (8 lines) with its own scroll position. **Shift+Up / Shift+Down** scroll it a full page at a time, and **Home / End** jump to the start or end. Arrow keys navigate the action list.
-
-Confirmation is unconditional — there is no bypass path.
+Dismissing the prompt is treated as **Cancel**. Confirmation is unconditional — there is no bypass path.
 
 ### Editing
 
-**Edit before running** launches an external editor directly — it does not use Pi's built-in multi-line editor or its `externalEditor` setting. The block's exact contents are written to a fresh temporary directory (`pi-invoker-<random>`) as `script<suffix>`, where `<suffix>` is a fixed extension derived from the block's language tag (`.sh`, `.zsh`, `.fish`, `.py`, `.js`, `.ts`, or `.txt` for anything unrecognized). The command is resolved in order: `$VISUAL`, then `$EDITOR`, then the platform default (`notepad` on Windows, `nano` elsewhere) — command splitting is a plain space split, matching Pi's own resolution logic, with no shell parsing or quoting support.
-
-The TUI is stopped while the editor owns the terminal and restarted (with a full render) once the editor exits, regardless of outcome. On a clean (zero) exit the edited script is read back (leading BOM and one trailing newline stripped) and **confirmation is required again** with the edited code. Launch failure or a nonzero exit discards the edit and returns to confirmation unchanged. The temporary directory is always removed. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts.
+**Edit before running** opens the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents. pi-invoker delegates editing entirely to this host-provided primitive and no longer implements or owns an external editor process, temporary script file, or TUI lifecycle; depending on the host, `ctx.ui.editor` may itself invoke an external editor (e.g. via a host-specific capability). Dismissing the editor discards the edit and returns to confirmation unchanged. Otherwise, the edited contents replace the block's contents (an empty string is a valid edit) and **confirmation is required again** with the edited code. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts.
 
 ### Result display
 
-**Run locally** shows the result in a scrollable inline panel. The panel is a bounded, fixed-height viewport (12 lines). It displays the language tag, `exit 0` / `exit N` or `cancelled`, and combined output. When output was tail-bounded the retained and total byte and line counts are shown. The panel supports the same scroll keys as the confirmation panel (**Shift+Up / Shift+Down**, **Home / End**).
+**Run locally** shows the result via a native `ctx.ui.confirm` prompt. It displays the language tag, `exit 0` / `exit N` or `cancelled`, and the retained combined output. When output was tail-bounded, the retained and total byte and line counts are also shown.
 
-Two actions are available after a local run:
+Confirming the prompt sends the result to the agent (**Send to agent**); declining or dismissing closes it without notifying the agent (**Close**):
 
 | Action | Meaning |
 |---|---|
-| **Close** | Dismiss the panel. The agent is not notified. |
-| **Send to agent** | Deliver the captured result as a custom message, triggering the next agent turn. Uses the result already captured — the block is not re-executed. |
+| **Close** | Decline or dismiss the prompt. The agent is not notified. |
+| **Send to agent** | Confirm the prompt. Deliver the captured result as a custom message, triggering the next agent turn. Uses the result already captured — the block is not re-executed. |
 
-**Run and report** skips the result panel entirely and delivers the result to the agent immediately after execution completes.
+**Run and report** skips the result prompt entirely and delivers the result to the agent immediately after execution completes.
 
 ### Result delivery
 
@@ -87,9 +83,7 @@ The model-facing payload includes:
 - `outputLines` — newline count in retained `output`.
 - `totalLines` — total newline count across all received output.
 - `exitCode` — numeric process exit status.
-- `cancelled` — whether execution was terminated via cancellation. Cancellation is reported as `cancelled` in the compact card rather than as an exit status.
-
-Cancelled executions are reported in both **Send to agent** and **Run and report** modes.
+- `cancelled` — whether execution was terminated via cancellation. Cancellation is reported as `cancelled` in the compact card rather than as an exit status. There is currently no in-flow UI for the user to trigger cancellation of a running process; this field reflects the result schema's support for it.
 
 ## Supported tags
 
@@ -113,11 +107,9 @@ Cancelled executions are reported in both **Send to agent** and **Run and report
 
 | Condition | Behavior |
 |---|---|
-| Non-TUI mode | Error notification; no process started. |
 | Missing interpreter | Error notification; no process started. |
 | TypeScript on Node < 22.19 | `UnsupportedRuntimeError`; no process started. |
 | Non-zero exit status | Surfaced explicitly; never silently ignored. |
-| Cancelled execution | Explicit cancelled result; reported when delivered to the agent in either mode. |
 | Output exceeds 50 KB / 2000 lines | Tail retained; truncation boundary, byte count, and line count shown. |
 | Concurrent invocation | Rejected with a notification; the second trigger is not queued. |
 
