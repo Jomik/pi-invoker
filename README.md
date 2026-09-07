@@ -48,6 +48,10 @@ Dismissing the prompt is treated as **Cancel**. Confirmation is unconditional �
 
 **Edit before running** opens the host's built-in multiline `ctx.ui.editor`, prefilled with the block's current contents. pi-invoker delegates editing entirely to this host-provided primitive and no longer implements or owns an external editor process, temporary script file, or TUI lifecycle; depending on the host, `ctx.ui.editor` may itself invoke an external editor (e.g. via a host-specific capability). Dismissing the editor discards the edit and returns to confirmation unchanged. Otherwise, the edited contents replace the block's contents (an empty string is a valid edit) and **confirmation is required again** with the edited code. The edit-and-reconfirm cycle may repeat any number of times before execution actually starts.
 
+### Execution status
+
+While execution is pending, pi-invoker publishes a transient `Running [tag]…` status through `ctx.ui.setStatus` and clears it once execution settles (success or failure). Whether and how this status is rendered depends on the host — support and presentation vary; this is not a blocking dialog and does not affect the confirmation or result-delivery flow.
+
 ### Result display
 
 **Run locally** shows the result via a native `ctx.ui.confirm` prompt. It displays the language tag, `exit 0` / `exit N` or `cancelled`, and the retained combined output. When output was tail-bounded, the retained and total byte and line counts are also shown.
