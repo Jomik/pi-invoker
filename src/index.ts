@@ -173,7 +173,7 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
     const finalBlock = block; // capture for the confirmation loop
     let result: ExecuteResult;
     try {
-      ctx.ui.setStatus(STATUS_KEY, `Running ${finalBlock.tag}…`);
+      ctx.ui.setStatus(STATUS_KEY, `Running [${finalBlock.tag}]…`);
       result = await executeBlock(descriptor, finalBlock.contents, ctx.cwd);
     } catch (err) {
       ctx.ui.notify(`Execution failed: ${err instanceof Error ? err.message : String(err)}`, "error");

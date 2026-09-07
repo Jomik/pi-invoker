@@ -122,7 +122,7 @@ function makeFakeCtx(options: FakeCtxOptions = {}) {
   ];
 
   const notifyCalls: NotifyCall[] = [];
-  const statusCalls: (string | undefined)[] = [];
+  const statusCalls: { key: string; text: string | undefined }[] = [];
 
   // biome-ignore lint/suspicious/noExplicitAny: test-only fake
   const ctx: any = {
@@ -137,8 +137,8 @@ function makeFakeCtx(options: FakeCtxOptions = {}) {
       notify: vi.fn((message: string, type?: string) => {
         notifyCalls.push({ message, type });
       }),
-      setStatus: vi.fn((_key: string, text: string | undefined) => {
-        statusCalls.push(text);
+      setStatus: vi.fn((key: string, text: string | undefined) => {
+        statusCalls.push({ key, text });
       }),
     },
   };
@@ -1040,7 +1040,10 @@ describe("invokeFlow — executeBlock rejection", () => {
 
     await invokeFlow(ctx, deliverMessage);
 
-    expect(statusCalls).toEqual(["Running bash\u2026", undefined]);
+    expect(statusCalls).toEqual([
+      { key: "pi-invoker", text: "Running [bash]\u2026" },
+      { key: "pi-invoker", text: undefined },
+    ]);
   });
 });
 
@@ -1054,11 +1057,18 @@ describe("invokeFlow — execution status", () => {
     const { deliverMessage } = makeDeliveryCallback();
 
     mockConfirmBlock.mockResolvedValue("run-and-report");
-    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+    // Prove the running status is already set by the time executeBlock is invoked.
+    mockExecuteBlock.mockImplementation(async () => {
+      expect(statusCalls).toEqual([{ key: "pi-invoker", text: "Running [bash]\u2026" }]);
+      return makeExecuteResult();
+    });
 
     await invokeFlow(ctx, deliverMessage);
 
-    expect(statusCalls).toEqual(["Running bash\u2026", undefined]);
+    expect(statusCalls).toEqual([
+      { key: "pi-invoker", text: "Running [bash]\u2026" },
+      { key: "pi-invoker", text: undefined },
+    ]);
   });
 
   it("does not set any status before the interpreter resolves successfully", async () => {
