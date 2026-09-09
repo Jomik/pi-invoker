@@ -1,12 +1,16 @@
 /**
  * Picker, confirmation, editing, and result UI for code block invocation.
  *
- * Uses only RPC-portable primitives from ctx.ui (select / editor / confirm)
- * so this extension works identically in TUI and RPC modes. No ctx.ui.custom
- * dialogs and no external-editor process are used here.
+ * Picker/confirmation/editing/result dialogs use only RPC-portable
+ * primitives from ctx.ui (select / editor / confirm) so they work
+ * identically in TUI and RPC modes. The one exception is
+ * {@link runWithLoader}, which opens a ctx.ui.custom BorderedLoader while a
+ * block executes in TUI mode, and calls the operation directly (no custom
+ * UI) everywhere else.
  */
 
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { BorderedLoader, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import type { FencedBlock } from "./blocks.js";
 import type { ExecuteResult } from "./executor.js";
 
@@ -152,4 +156,68 @@ export async function showExecutionResult(
 
   const confirmed = await ctx.ui.confirm(title, message);
   return confirmed ? "send-to-agent" : "close";
+}
+
+// ---------------------------------------------------------------------------
+// runWithLoader
+// ---------------------------------------------------------------------------
+
+/** Internal outcome union used to shuttle the settled operation result or
+ * error back out through the `ctx.ui.custom` promise. */
+type LoaderOutcome = { result: ExecuteResult } | { error: unknown };
+
+/**
+ * Run `operation` for `block`, showing a BorderedLoader while it is pending
+ * in TUI mode, or invoking `operation` directly everywhere else.
+ *
+ * - Non-TUI (`ctx.mode !== "tui"`): calls `operation()` directly with no
+ *   signal and no `ctx.ui.custom` dialog — BorderedLoader is a TUI-only
+ *   primitive and every other mode already relies solely on RPC-portable
+ *   `ctx.ui` primitives.
+ * - TUI: opens `ctx.ui.custom` with a BorderedLoader whose static message
+ *   shows only `Running [tag]…` (the submitted code is not shown), plus a
+ *   child Text component that streams live output as `operation` reports
+ *   it. `operation` is started with the loader's AbortSignal and an output
+ *   callback that replaces the Text content with the retained output (after
+ *   stripping terminal sequences) and requests a re-render. Escape/Ctrl-C
+ *   on the loader aborts that signal (BorderedLoader/CancellableLoader
+ *   handle this internally on their configured cancel key), but the custom
+ *   UI stays open — this function waits for `operation` to settle and only
+ *   then calls `done` with the settled outcome, so cancelled-output/report
+ *   semantics stay intact end-to-end.
+ *
+ * If `operation` rejects, the original error is rethrown unchanged.
+ */
+export async function runWithLoader(
+  ctx: ExtensionContext,
+  block: FencedBlock,
+  operation: (signal?: AbortSignal, onOutput?: (retainedOutput: string) => void) => Promise<ExecuteResult>,
+): Promise<ExecuteResult> {
+  if (ctx.mode !== "tui") {
+    return operation();
+  }
+
+  const message = `Running [${block.tag}]…`;
+
+  const outcome = await ctx.ui.custom<LoaderOutcome>((tui, theme, _keybindings, done) => {
+    const loader = new BorderedLoader(tui, theme, message);
+    const outputText = new Text("(waiting for output)", 1, 0);
+    // BorderedLoader's final child is the bottom DynamicBorder; insert the
+    // output Text immediately before it so it renders inside the border
+    // (above the bottom edge) rather than appended after/outside it.
+    loader.children.splice(loader.children.length - 1, 0, outputText);
+    operation(loader.signal, (retainedOutput) => {
+      outputText.setText(stripTerminalSequences(retainedOutput));
+      tui.requestRender();
+    }).then(
+      (result) => done({ result }),
+      (error) => done({ error }),
+    );
+    return loader;
+  });
+
+  if ("error" in outcome) {
+    throw outcome.error;
+  }
+  return outcome.result;
 }

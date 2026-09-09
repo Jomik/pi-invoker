@@ -1,8 +1,10 @@
 /**
  * Tests for src/index.ts
  *
- * Uses module mocks for UI functions, executeBlock, and resolveInterpreter so
- * that tests run without a real TUI or spawned processes.
+ * Uses module mocks for UI functions (including runWithLoader, defaulted to
+ * directly invoking its operation argument), executeBlock, and
+ * resolveInterpreter so that tests run without a real TUI or spawned
+ * processes.
  */
 
 import { beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
@@ -29,12 +31,16 @@ vi.mock("../src/interpreters.js", async (importOriginal) => {
   };
 });
 
-// Mock the four UI functions so tests can control their return values.
+// Mock the UI functions so tests can control their return values.
+// runWithLoader defaults to directly invoking the operation with no signal
+// (mirroring non-TUI/RPC-mode behavior); individual tests override this to
+// prove the supplied signal reaches executeBlock.
 vi.mock("../src/ui.js", () => ({
   pickBlock: vi.fn(),
   confirmBlock: vi.fn(),
   editBlock: vi.fn(),
   showExecutionResult: vi.fn(),
+  runWithLoader: vi.fn((_ctx, _block, operation) => operation()),
 }));
 
 // ---------------------------------------------------------------------------
@@ -44,7 +50,7 @@ vi.mock("../src/ui.js", () => ({
 import { executeBlock } from "../src/executor.js";
 import extension, { invokeFlow } from "../src/index.js";
 import { resolveInterpreter } from "../src/interpreters.js";
-import { confirmBlock, editBlock, pickBlock, showExecutionResult } from "../src/ui.js";
+import { confirmBlock, editBlock, pickBlock, runWithLoader, showExecutionResult } from "../src/ui.js";
 
 // ---------------------------------------------------------------------------
 // Typed mock accessors
@@ -56,6 +62,7 @@ const mockPickBlock = pickBlock as unknown as MockInstance;
 const mockConfirmBlock = confirmBlock as unknown as MockInstance;
 const mockEditBlock = editBlock as unknown as MockInstance;
 const mockShowExecutionResult = showExecutionResult as unknown as MockInstance;
+const mockRunWithLoader = runWithLoader as unknown as MockInstance;
 
 // ---------------------------------------------------------------------------
 // Fake data
@@ -1249,5 +1256,81 @@ describe("invokeFlow — delivery modes", () => {
 
     expect(calls).toHaveLength(1);
     expect(mockExecuteBlock).toHaveBeenCalledOnce();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. runWithLoader integration: signal propagation and non-interactive warning
+// ---------------------------------------------------------------------------
+
+describe("invokeFlow — runWithLoader integration", () => {
+  it("passes a signal supplied by runWithLoader through to executeBlock", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage } = makeDeliveryCallback();
+    const fakeSignal = new AbortController().signal;
+
+    // Simulate the TUI loader supplying its AbortSignal to the operation.
+    mockRunWithLoader.mockImplementationOnce(
+      async (_ctx: unknown, _block: unknown, operation: (signal?: AbortSignal) => Promise<ExecuteResult>) =>
+        operation(fakeSignal),
+    );
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(mockExecuteBlock).toHaveBeenCalledOnce();
+    expect(mockExecuteBlock.mock.calls[0]?.[3]).toBe(fakeSignal);
+  });
+
+  it("passes an onOutput callback supplied by runWithLoader through to executeBlock's fifth arg", async () => {
+    const { ctx } = makeFakeCtx();
+    const { deliverMessage } = makeDeliveryCallback();
+    const fakeOnOutput = vi.fn((_retainedOutput: string) => {});
+
+    // Simulate the TUI loader supplying an output callback to the operation.
+    mockRunWithLoader.mockImplementationOnce(
+      async (
+        _ctx: unknown,
+        _block: unknown,
+        operation: (signal?: AbortSignal, onOutput?: (retainedOutput: string) => void) => Promise<ExecuteResult>,
+      ) => operation(undefined, fakeOnOutput),
+    );
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult());
+
+    await invokeFlow(ctx, deliverMessage);
+
+    expect(mockExecuteBlock).toHaveBeenCalledOnce();
+    expect(mockExecuteBlock.mock.calls[0]?.[4]).toBe(fakeOnOutput);
+  });
+
+  it("emits a cancellation warning notification when the result is cancelled", async () => {
+    const { ctx, notifyCalls } = makeFakeCtx();
+    const { deliverMessage } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult({ cancelled: true, exitCode: 130 }));
+
+    await invokeFlow(ctx, deliverMessage);
+
+    const warning = notifyCalls.find((n) =>
+      n.message.includes("Execution cancelled. /invoke is non-interactive; interactive input is unsupported."),
+    );
+    expect(warning).toBeDefined();
+    expect(warning?.type).toBe("warning");
+  });
+
+  it("does not emit the cancellation warning when the result is not cancelled", async () => {
+    const { ctx, notifyCalls } = makeFakeCtx();
+    const { deliverMessage } = makeDeliveryCallback();
+
+    mockConfirmBlock.mockResolvedValue("run-and-report");
+    mockExecuteBlock.mockResolvedValue(makeExecuteResult({ cancelled: false }));
+
+    await invokeFlow(ctx, deliverMessage);
+
+    const warning = notifyCalls.find((n) => n.message.includes("Execution cancelled"));
+    expect(warning).toBeUndefined();
   });
 });

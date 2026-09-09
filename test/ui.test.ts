@@ -2,15 +2,18 @@
  * Tests for src/ui.ts
  *
  * Uses a minimal fake ExtensionContext whose ctx.ui.select/editor/confirm
- * implementations are controllable per test. No ctx.ui.custom is exercised
- * here — these functions must only use the RPC-portable primitives.
+ * implementations are controllable per test. pickBlock/confirmBlock/
+ * editBlock/showExecutionResult must only use the RPC-portable primitives,
+ * so ctx.ui.custom() is not exercised by those tests. runWithLoader is the
+ * one exception — it uses ctx.ui.custom() with a BorderedLoader in TUI mode
+ * and is covered separately below.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type { FencedBlock } from "../src/blocks.js";
 import type { ExecuteResult } from "../src/executor.js";
-import { confirmBlock, editBlock, pickBlock, showExecutionResult } from "../src/ui.js";
+import { confirmBlock, editBlock, pickBlock, runWithLoader, showExecutionResult } from "../src/ui.js";
 
 // ---------------------------------------------------------------------------
 // Fake ExtensionContext
@@ -287,5 +290,234 @@ describe("showExecutionResult", () => {
     const { ctx } = makeCtx({ confirm: async () => false });
     const action = await showExecutionResult(ctx, block, makeResult());
     expect(action).toBe("close");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runWithLoader
+// ---------------------------------------------------------------------------
+
+/**
+ * @earendil-works/pi-coding-agent's BorderedLoader is mocked so tests do not
+ * depend on its real key-handling/rendering internals. The mock's
+ * constructor signature is `(tui, theme, message)`, matching production
+ * usage. It exposes `signal` (an AbortSignal) and `handleInput`, plus a
+ * test-only `simulateCancelKey()` helper standing in for the loader's
+ * configured Escape/Ctrl-C cancel key — invoking `handleInput` aborts
+ * `signal` without closing anything itself, mirroring the real component's
+ * contract (BorderedLoader/CancellableLoader abort their own signal on
+ * cancel; they never close the surrounding custom UI).
+ */
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return {
+    ...actual,
+    // biome-ignore lint/complexity/useArrowFunction: must stay constructible for `new BorderedLoader(...)`
+    BorderedLoader: vi.fn().mockImplementation(function (tui: unknown, theme: unknown, message: string) {
+      const controller = new AbortController();
+      // Sentinels standing in for the real BorderedLoader's top/bottom
+      // DynamicBorder children, so tests can assert the output Text is
+      // inserted immediately before the final (bottom) child.
+      const topBorder = { role: "top-border" };
+      const bottomBorder = { role: "bottom-border" };
+      const children: unknown[] = [topBorder, bottomBorder];
+      return {
+        tui,
+        theme,
+        message,
+        signal: controller.signal,
+        children,
+        handleInput: vi.fn(() => controller.abort()),
+        dispose: vi.fn(),
+        // Test-only stand-in for the loader's real Escape/Ctrl-C key handling.
+        simulateCancelKey: () => controller.abort(),
+      };
+    }),
+  };
+});
+
+interface FakeLoader {
+  message: string;
+  signal: AbortSignal;
+  children: unknown[];
+  handleInput: ReturnType<typeof vi.fn>;
+  dispose: ReturnType<typeof vi.fn>;
+  simulateCancelKey: () => void;
+}
+
+function makeTuiCtx(): {
+  ctx: ExtensionContext;
+  customMock: ReturnType<typeof vi.fn>;
+  requestRenderMock: ReturnType<typeof vi.fn>;
+} {
+  // Fake ctx.ui.custom(): invokes the supplied factory with (tui, theme,
+  // keybindings, done) and returns a promise resolved by calling `done`,
+  // mirroring the real contract where `done(value)` closes the custom UI
+  // and resolves the ctx.ui.custom() promise with `value`.
+  const requestRenderMock = vi.fn();
+  const customMock = vi.fn(
+    (factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (value: unknown) => void) => unknown) => {
+      let component: unknown;
+      const promise = new Promise((resolve) => {
+        component = factory({ requestRender: requestRenderMock }, {}, {}, resolve);
+      });
+      return Object.assign(promise, { component });
+    },
+  );
+  // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+  const ctx: any = {
+    mode: "tui",
+    ui: { custom: customMock },
+  };
+  return { ctx: ctx as ExtensionContext, customMock, requestRenderMock };
+}
+
+/** Retrieve the mounted FakeLoader returned by the most recent ctx.ui.custom() factory call. */
+function getLoader(customMock: ReturnType<typeof vi.fn>): FakeLoader {
+  const returned = customMock.mock.results[0]?.value as { component: FakeLoader };
+  return returned.component;
+}
+
+const LOADER_BLOCK: FencedBlock = { tag: "bash", contents: "echo one\necho two" };
+
+describe("runWithLoader", () => {
+  it("non-TUI mode calls the operation directly with no ctx.ui.custom dialog", async () => {
+    // biome-ignore lint/suspicious/noExplicitAny: test-only fake
+    const ctx: any = {
+      mode: "rpc",
+      ui: {
+        custom: vi.fn(() => {
+          throw new Error("ctx.ui.custom() must not be used outside TUI mode");
+        }),
+      },
+    };
+    const operation = vi.fn(async (_signal?: AbortSignal) => makeResult());
+
+    const result = await runWithLoader(ctx as ExtensionContext, LOADER_BLOCK, operation);
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(operation.mock.calls[0]?.[0]).toBeUndefined();
+    expect(result).toEqual(makeResult());
+  });
+
+  it("TUI mode opens ctx.ui.custom and starts the operation with an AbortSignal", async () => {
+    const { ctx, customMock } = makeTuiCtx();
+    const operation = vi.fn(async (_signal?: AbortSignal) => makeResult());
+
+    await runWithLoader(ctx, LOADER_BLOCK, operation);
+
+    expect(customMock).toHaveBeenCalledOnce();
+    expect(operation).toHaveBeenCalledOnce();
+    const signal = operation.mock.calls[0]?.[0];
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("loader message shows only 'Running [tag]…' and omits the submitted code", async () => {
+    const { ctx, customMock } = makeTuiCtx();
+    const operation = vi.fn(async (_signal?: AbortSignal) => makeResult());
+
+    await runWithLoader(ctx, LOADER_BLOCK, operation);
+
+    const loader = getLoader(customMock);
+    expect(loader.message).toBe("Running [bash]…");
+    expect(loader.message).not.toContain("echo one");
+    expect(loader.message).not.toContain("echo two");
+  });
+
+  it("inserts a Text child into the loader immediately before the final (bottom) child, initialized to '(waiting for output)'", async () => {
+    const { ctx, customMock } = makeTuiCtx();
+    const operation = vi.fn(async (_signal?: AbortSignal) => makeResult());
+
+    await runWithLoader(ctx, LOADER_BLOCK, operation);
+
+    const loader = getLoader(customMock);
+    expect(loader.children).toHaveLength(3);
+    const bottomSentinel = loader.children[2] as { role: string };
+    expect(bottomSentinel.role).toBe("bottom-border");
+    const outputText = loader.children[1] as { render: (width: number) => string[] };
+    expect(outputText.render(80).join("\n")).toContain("(waiting for output)");
+    // Output Text sits directly before the final bottom border/sentinel.
+    expect(loader.children[loader.children.length - 1]).toBe(bottomSentinel);
+  });
+
+  it("starts the operation with an onOutput callback that updates the Text content and requests a render", async () => {
+    const { ctx, customMock, requestRenderMock } = makeTuiCtx();
+    let onOutput: ((retainedOutput: string) => void) | undefined;
+    const operation = vi.fn(async (_signal?: AbortSignal, callback?: (retainedOutput: string) => void) => {
+      onOutput = callback;
+      return makeResult();
+    });
+
+    await runWithLoader(ctx, LOADER_BLOCK, operation);
+
+    expect(onOutput).toBeInstanceOf(Function);
+    const loader = getLoader(customMock);
+    const outputText = loader.children[1] as { render: (width: number) => string[] };
+
+    onOutput?.("hello from the running process");
+
+    expect(outputText.render(80).join("\n")).toContain("hello from the running process");
+    expect(requestRenderMock).toHaveBeenCalled();
+  });
+
+  it("resolves with the settled ExecuteResult after a normal completion", async () => {
+    const { ctx } = makeTuiCtx();
+    const settled = makeResult({ output: "done" });
+    const operation = vi.fn(async (_signal?: AbortSignal) => settled);
+
+    const result = await runWithLoader(ctx, LOADER_BLOCK, operation);
+
+    expect(result).toBe(settled);
+  });
+
+  it(
+    "invoking the loader's configured cancel key aborts the operation signal, " +
+      "but the custom UI stays pending until the operation settles",
+    async () => {
+      const { ctx, customMock } = makeTuiCtx();
+      let resolveOperation!: (result: ExecuteResult) => void;
+      const pending = new Promise<ExecuteResult>((resolve) => {
+        resolveOperation = resolve;
+      });
+      let observedAborted = false;
+      const operation = vi.fn((signal?: AbortSignal) => {
+        signal?.addEventListener("abort", () => {
+          observedAborted = true;
+        });
+        return pending;
+      });
+
+      const runPromise = runWithLoader(ctx, LOADER_BLOCK, operation);
+      const loader = getLoader(customMock);
+
+      // Simulate Escape/Ctrl-C: aborts the signal only.
+      loader.simulateCancelKey();
+      expect(observedAborted).toBe(true);
+
+      // The operation is still pending — the custom UI promise (and thus
+      // runWithLoader) must not resolve yet.
+      let settled = false;
+      runPromise.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      const cancelledResult = makeResult({ cancelled: true, exitCode: 130 });
+      resolveOperation(cancelledResult);
+
+      const result = await runPromise;
+      expect(result).toBe(cancelledResult);
+    },
+  );
+
+  it("rethrows the original error when the operation rejects", async () => {
+    const { ctx } = makeTuiCtx();
+    const failure = new Error("spawn failed");
+    const operation = vi.fn(async (_signal?: AbortSignal) => {
+      throw failure;
+    });
+
+    await expect(runWithLoader(ctx, LOADER_BLOCK, operation)).rejects.toThrow(failure);
   });
 });

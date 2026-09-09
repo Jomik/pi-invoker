@@ -50,7 +50,9 @@ Dismissing the prompt is treated as **Cancel**. Confirmation is unconditional �
 
 ### Execution status
 
-While execution is pending, pi-invoker publishes a transient `Running [tag]…` status through `ctx.ui.setStatus` and clears it once execution settles (success or failure). Whether and how this status is rendered depends on the host — support and presentation vary; this is not a blocking dialog and does not affect the confirmation or result-delivery flow.
+While execution is pending, pi-invoker publishes a transient `Running [tag]…` status through `ctx.ui.setStatus` and clears it once execution settles (success or failure). This portable status path is used in every host, including RPC hosts. Whether and how it is rendered depends on the host — support and presentation vary; this is not a blocking dialog and does not affect the confirmation or result-delivery flow.
+
+In the TUI specifically, execution additionally runs inside a Pi `BorderedLoader` showing `Running [tag]…` (not the submitted code) plus a live panel below it. The panel starts out showing `(waiting for output)` and is updated as output chunks arrive, always showing the currently retained combined stdout/stderr (with terminal control sequences stripped for display) — it follows the same 50KB/2000-line retained tail described under Error and edge-case behavior, so older output can disappear from the panel once those bounds are exceeded. Stripping is display-only and does not affect the captured output used for the result prompt or the delivered report. The loader's configured cancel key (normally Escape or Ctrl-C) aborts the running process; pi-invoker waits for the process to actually settle before closing the loader, so cancelled output and the result/report flow behave exactly as they would after a normal exit. This loader is TUI-only — RPC and other non-TUI modes never use it and rely solely on `setStatus` plus the native result/delivery flow described above; they show a portable status and the final result only, with no custom live panel.
 
 ### Result display
 
@@ -87,7 +89,7 @@ The model-facing payload includes:
 - `outputLines` — newline count in retained `output`.
 - `totalLines` — total newline count across all received output.
 - `exitCode` — numeric process exit status.
-- `cancelled` — whether execution was terminated via cancellation. Cancellation is reported as `cancelled` in the compact card rather than as an exit status. There is currently no in-flow UI for the user to trigger cancellation of a running process; this field reflects the result schema's support for it.
+- `cancelled` — whether execution was terminated via cancellation. Cancellation is reported as `cancelled` in the compact card rather than as an exit status. In the TUI, the loader's cancel key (normally Escape/Ctrl-C) triggers this while a process is running; a cancellation warning notes that interactive input is unsupported, but does not claim that the process required input or that input caused the cancellation.
 
 ## Supported tags
 
@@ -99,12 +101,12 @@ The model-facing payload includes:
 | `fish` | `fish` |
 | `python`, `python3`, `py` | `python3` |
 | `javascript`, `js`, `node` | current `node` runtime |
-| `typescript`, `ts` | current `node` runtime via native TypeScript stdin (requires Node ≥ 22.19) |
+| `typescript`, `ts` | current `node` runtime via a temporary `.mts` script file (requires Node ≥ 22.19) |
 
 ## Execution environment
 
 - **Working directory:** the project root Pi has open.
-- **Input:** code block passed via stdin. No PTY is allocated; no interactive input is forwarded.
+- **Input:** the block's code is written to a unique, private temporary script file (mode `0600`, language-appropriate suffix) and run by passing that file's path to the interpreter; the code is never fed via stdin. The file is removed once execution settles or immediately after a setup failure. The process's runtime stdin is closed/ignored — no PTY is allocated and no interactive input is forwarded or prompted for. A well-behaved command that itself tries to read from stdin receives EOF immediately and should fail or exit rather than consuming the script source, but pi-invoker cannot reliably detect or guarantee this for every third-party CLI.
 - **Environment:** inherits the host shell environment (`process.env`).
 
 ## Error and edge-case behavior
