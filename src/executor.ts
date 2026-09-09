@@ -1,10 +1,15 @@
 /**
- * Block executor: spawns an interpreter with code fed via stdin, captures
- * combined stdout+stderr in arrival order, and returns bounded execution
- * metadata.  Nonzero exits are results — they are never thrown.
+ * Block executor: spawns an interpreter against a script file written to a
+ * private temporary directory (runtime stdin is closed, never the code
+ * source), captures combined stdout+stderr in arrival order, and returns
+ * bounded execution metadata.  Nonzero exits are results — they are never
+ * thrown.
  */
 
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { ExecutionDescriptor } from "./interpreters.js";
 
@@ -156,6 +161,16 @@ class TailBuffer {
 // Process-group kill helpers (POSIX only)
 // ---------------------------------------------------------------------------
 
+/** Best-effort removal of the private temp script directory; never throws. */
+function cleanupScriptDir(scriptDir: string | undefined): void {
+  if (scriptDir === undefined) return;
+  try {
+    rmSync(scriptDir, { recursive: true, force: true });
+  } catch {
+    // best-effort cleanup; ignore errors (e.g. already removed)
+  }
+}
+
 function sendSignalToGroup(pid: number, sig: "SIGTERM" | "SIGKILL", fallbackKill: () => void): void {
   try {
     process.kill(-pid, sig);
@@ -175,10 +190,12 @@ function sendSignalToGroup(pid: number, sig: "SIGTERM" | "SIGKILL", fallbackKill
 // ---------------------------------------------------------------------------
 
 /**
- * Spawns `descriptor.command` with `descriptor.args`, feeds `code` via stdin,
- * captures combined stdout+stderr in arrival order, and resolves with an
+ * Spawns `descriptor.command` with `descriptor.args` followed by the path to
+ * a private temporary script file containing `code` (mode 0600), captures
+ * combined stdout+stderr in arrival order, and resolves with an
  * {@link ExecuteResult}.  Nonzero exit codes are returned as results and are
- * never thrown.
+ * never thrown.  Runtime stdin is closed/ignored — the script source and the
+ * process's stdin are never the same stream.
  *
  * Output is tail-bounded to 50 KB / 2000 lines and older data is evicted
  * incrementally — full output is never held in memory.
@@ -186,13 +203,16 @@ function sendSignalToGroup(pid: number, sig: "SIGTERM" | "SIGKILL", fallbackKill
  * If `signal` is already aborted the function returns immediately without
  * spawning.  If `signal` fires during execution the process group receives
  * SIGTERM (POSIX) or a direct kill (Windows); a SIGKILL escalation is issued
- * after {@link GRACE_MS} ms if the process has not yet exited.
+ * after {@link GRACE_MS} ms if the process has not yet exited.  The temporary
+ * script directory is removed on normal close, abort, spawn error, and setup
+ * failure.
  */
 export async function executeBlock(
   descriptor: ExecutionDescriptor,
   code: string,
   cwd: string,
   signal?: AbortSignal,
+  onOutput?: (retainedOutput: string) => void,
 ): Promise<ExecuteResult> {
   // Pre-abort: return immediately without spawning.
   if (signal?.aborted) {
@@ -208,17 +228,69 @@ export async function executeBlock(
     };
   }
 
+  // Write the code to a private temp script file (mode 0600) rather than
+  // feeding it via stdin, so runtime stdin remains a separate, closed stream.
+  let scriptDir: string | undefined;
+  let scriptPath: string;
+  try {
+    scriptDir = mkdtempSync(join(tmpdir(), "pi-invoker-"));
+    scriptPath = join(scriptDir, `script${descriptor.scriptSuffix ?? ""}`);
+    writeFileSync(scriptPath, code, { mode: 0o600 });
+  } catch {
+    cleanupScriptDir(scriptDir);
+    return {
+      output: "",
+      exitCode: 1,
+      cancelled: false,
+      truncated: false,
+      outputBytes: 0,
+      totalBytes: 0,
+      outputLines: 0,
+      totalLines: 0,
+    };
+  }
+
   return new Promise<ExecuteResult>((resolve) => {
-    const child = spawn(descriptor.command, descriptor.args, {
-      cwd,
-      env: process.env,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: !IS_WINDOWS, // own process group on POSIX for group-kill support
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(descriptor.command, [...descriptor.args, scriptPath], {
+        cwd,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: !IS_WINDOWS, // own process group on POSIX for group-kill support
+      });
+    } catch {
+      // spawn() itself threw synchronously (rare; e.g. platform-level failure
+      // before a child process exists). Treat identically to an async spawn
+      // error: resolve, never reject.
+      cleanupScriptDir(scriptDir);
+      resolve({
+        output: "",
+        exitCode: 1,
+        cancelled: false,
+        truncated: false,
+        outputBytes: 0,
+        totalBytes: 0,
+        outputLines: 0,
+        totalLines: 0,
+      });
+      return;
+    }
 
     const buf = new TailBuffer();
     const stdoutDec = new StringDecoder("utf8");
     const stderrDec = new StringDecoder("utf8");
+
+    // Notify the observer after every decoded addition; observer exceptions
+    // must never crash or alter execution.
+    function emitOutput(): void {
+      if (!onOutput) return;
+      try {
+        onOutput(buf.result().output);
+      } catch {
+        // swallow observer exceptions
+      }
+    }
 
     let cancelled = false;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -248,13 +320,23 @@ export async function executeBlock(
       if (!stdoutFlushed) {
         stdoutFlushed = true;
         const tail = stdoutDec.end();
-        if (tail) buf.push(tail);
+        if (tail) {
+          buf.push(tail);
+          emitOutput();
+        }
       }
       if (!stderrFlushed) {
         stderrFlushed = true;
         const tail = stderrDec.end();
-        if (tail) buf.push(tail);
+        if (tail) {
+          buf.push(tail);
+          emitOutput();
+        }
       }
+
+      // Remove the private temp script directory now that the process has
+      // settled (normal close, abort-triggered close, or spawn error).
+      cleanupScriptDir(scriptDir);
 
       resolve({ ...buf.result(), exitCode, cancelled: isCancelled });
     }
@@ -262,12 +344,18 @@ export async function executeBlock(
     // Interleave stdout and stderr in arrival order.
     child.stdout?.on("data", (chunk: Buffer) => {
       const text = stdoutDec.write(chunk);
-      if (text) buf.push(text);
+      if (text) {
+        buf.push(text);
+        emitOutput();
+      }
     });
 
     child.stderr?.on("data", (chunk: Buffer) => {
       const text = stderrDec.write(chunk);
-      if (text) buf.push(text);
+      if (text) {
+        buf.push(text);
+        emitOutput();
+      }
     });
 
     // Flush each decoder on stream end to capture any trailing incomplete
@@ -276,7 +364,10 @@ export async function executeBlock(
       if (!stdoutFlushed) {
         stdoutFlushed = true;
         const tail = stdoutDec.end();
-        if (tail) buf.push(tail);
+        if (tail) {
+          buf.push(tail);
+          emitOutput();
+        }
       }
     });
 
@@ -284,12 +375,14 @@ export async function executeBlock(
       if (!stderrFlushed) {
         stderrFlushed = true;
         const tail = stderrDec.end();
-        if (tail) buf.push(tail);
+        if (tail) {
+          buf.push(tail);
+          emitOutput();
+        }
       }
     });
 
     // Suppress EPIPE / stream errors when the child exits before we finish writing.
-    child.stdin?.on("error", () => {});
     child.stdout?.on("error", () => {});
     child.stderr?.on("error", () => {});
 
@@ -303,9 +396,6 @@ export async function executeBlock(
       // A close event may follow on Node.js v22+ for spawn failures; settle is idempotent.
       settle(1, cancelled);
     });
-
-    // Feed the code via stdin and close the write end.
-    child.stdin?.end(code, "utf8");
 
     // Wire the abort signal if one was provided.
     if (signal) {

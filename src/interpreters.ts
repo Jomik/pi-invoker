@@ -40,8 +40,15 @@ export function isRecognizedTag(tag: string): tag is RecognizedTag {
 export interface ExecutionDescriptor {
   /** Absolute path to the interpreter executable. */
   command: string;
-  /** Interpreter-level arguments prepended before code is fed via stdin. */
+  /** Interpreter-level arguments prepended before the script path argument. */
   args: string[];
+  /**
+   * Filename suffix (including the leading dot) applied to the temporary
+   * script file written for this interpreter, e.g. `.cjs`, `.mts`, `.sh`,
+   * `.fish`, `.py`.  Selects module/runtime semantics (e.g. CommonJS vs.
+   * TypeScript ESM) the same way a matching extension would on disk.
+   */
+  scriptSuffix?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +90,18 @@ function parseNodeVersion(version: string): { major: number; minor: number } {
 function supportsTypeScript(version: string): boolean {
   const { major, minor } = parseNodeVersion(version);
   return major > MIN_TS_MAJOR || (major === MIN_TS_MAJOR && minor >= MIN_TS_MINOR);
+}
+
+/** Returns the temp-script filename suffix appropriate for a shell/Python interpreter name. */
+function scriptSuffixForInterpreter(interpreter: string): string {
+  switch (interpreter) {
+    case "fish":
+      return ".fish";
+    case "python3":
+      return ".py";
+    default:
+      return ".sh"; // sh, bash, zsh
+  }
 }
 
 /**
@@ -134,11 +153,18 @@ export interface ResolveOptions {
 /**
  * Resolves a recognized language tag to an {@link ExecutionDescriptor}.
  *
- * - `javascript` / `js` / `node` → `process.execPath`, no extra args.
- * - `typescript` / `ts` → `process.execPath` with `--input-type=module-typescript`;
- *   throws {@link UnsupportedRuntimeError} when Node < 22.19.
- * - Shell / Python tags → absolute path located on PATH; throws
- *   {@link MissingInterpreterError} if the interpreter is absent.
+ * Code is executed from a script file on disk (never via stdin), so module
+ * semantics are selected via the {@link ExecutionDescriptor.scriptSuffix}
+ * file extension rather than stdin-only interpreter flags:
+ *
+ * - `javascript` / `js` / `node` → `process.execPath`, no extra args,
+ *   `.cjs` suffix (preserves current CommonJS semantics).
+ * - `typescript` / `ts` → `process.execPath`, no extra args, `.mts` suffix
+ *   (preserves current TypeScript ESM module semantics); throws
+ *   {@link UnsupportedRuntimeError} when Node < 22.19.
+ * - Shell / Python tags → absolute path located on PATH with a suffix
+ *   appropriate to the interpreter; throws {@link MissingInterpreterError}
+ *   if the interpreter is absent.
  */
 export function resolveInterpreter(tag: RecognizedTag, options: ResolveOptions = {}): ExecutionDescriptor {
   const nodeVersion = options.nodeVersion ?? process.version;
@@ -149,9 +175,9 @@ export function resolveInterpreter(tag: RecognizedTag, options: ResolveOptions =
       if (!supportsTypeScript(nodeVersion)) {
         throw new UnsupportedRuntimeError(nodeVersion);
       }
-      return { command: process.execPath, args: ["--input-type=module-typescript"] };
+      return { command: process.execPath, args: [], scriptSuffix: ".mts" };
     }
-    return { command: process.execPath, args: [] };
+    return { command: process.execPath, args: [], scriptSuffix: ".cjs" };
   }
 
   // Shell or Python: locate on host PATH.
@@ -160,5 +186,5 @@ export function resolveInterpreter(tag: RecognizedTag, options: ResolveOptions =
   if (found === null) {
     throw new MissingInterpreterError(interpreter);
   }
-  return { command: found, args: [] };
+  return { command: found, args: [], scriptSuffix: scriptSuffixForInterpreter(interpreter) };
 }

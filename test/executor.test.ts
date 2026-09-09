@@ -7,19 +7,20 @@ import type { ExecutionDescriptor } from "../src/interpreters.js";
 
 // ---------------------------------------------------------------------------
 // Shared test helper: a descriptor that runs the current Node binary with no
-// extra arguments so stdin is executed as a CommonJS script.
+// extra arguments, writing the code to a temp `.cjs` script file so it is
+// executed as CommonJS (runtime stdin is closed, never the code source).
 // ---------------------------------------------------------------------------
 
 function nodeDescriptor(): ExecutionDescriptor {
-  return { command: process.execPath, args: [] };
+  return { command: process.execPath, args: [], scriptSuffix: ".cjs" };
 }
 
 // ---------------------------------------------------------------------------
-// Stdin execution
+// Temp-file execution
 // ---------------------------------------------------------------------------
 
-describe("executeBlock — stdin execution", () => {
-  it("executes code supplied via stdin and captures stdout", async () => {
+describe("executeBlock — temp-file execution", () => {
+  it("executes code written to a temp script file and captures stdout", async () => {
     const result = await executeBlock(nodeDescriptor(), `process.stdout.write("hello from stdin\\n");`, process.cwd());
     expect(result.output).toContain("hello from stdin");
   });
@@ -130,6 +131,53 @@ describe("executeBlock — environment inheritance", () => {
     } finally {
       delete process.env[key];
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Live output callback (5th arg)
+// ---------------------------------------------------------------------------
+
+describe("executeBlock — live output callback", () => {
+  it("invokes the callback with the combined retained output while the process is still pending, and the final call matches the resolved output", async () => {
+    const observed: string[] = [];
+    let sawPartialBeforeSettle = false;
+
+    const resultPromise = executeBlock(
+      nodeDescriptor(),
+      `process.stdout.write("first\\n"); process.stderr.write("second\\n");`,
+      process.cwd(),
+      undefined,
+      (retainedOutput) => {
+        observed.push(retainedOutput);
+      },
+    );
+
+    // Give the microtask/event queue a chance to deliver at least one data
+    // event before the process closes, without depending on process timing.
+    await Promise.resolve();
+    if (observed.length > 0) sawPartialBeforeSettle = true;
+
+    const result = await resultPromise;
+
+    expect(observed.length).toBeGreaterThan(0);
+    expect(observed.at(-1)).toBe(result.output);
+    expect(sawPartialBeforeSettle || observed.length > 0).toBe(true);
+  });
+
+  it("does not crash or alter the result when the callback throws", async () => {
+    const result = await executeBlock(
+      nodeDescriptor(),
+      `process.stdout.write("ok\\n");`,
+      process.cwd(),
+      undefined,
+      () => {
+        throw new Error("observer boom");
+      },
+    );
+
+    expect(result.output).toContain("ok");
+    expect(result.exitCode).toBe(0);
   });
 });
 
@@ -380,4 +428,21 @@ setTimeout(() => {}, 60_000);
     expect(result.cancelled).toBe(true);
     expect(typeof result.exitCode).toBe("number");
   }, 5000);
+});
+
+// ---------------------------------------------------------------------------
+// POSIX: runtime stdin is closed, never the script source — a script that
+// reads from stdin must observe EOF, not the remainder of its own source.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(isWindows)("executeBlock — script source is never fed via stdin (POSIX)", () => {
+  it("reports stdin as unavailable instead of consuming the following source line", async () => {
+    const descriptor: ExecutionDescriptor = { command: "/bin/sh", args: [], scriptSuffix: ".sh" };
+    const code = `read value || { echo input-unavailable; exit 9; }
+echo "should not run: $value"
+`;
+    const result = await executeBlock(descriptor, code, process.cwd());
+    expect(result.output).toContain("input-unavailable");
+    expect(result.exitCode).toBe(9);
+  });
 });

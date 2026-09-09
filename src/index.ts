@@ -26,7 +26,7 @@ import {
   invocationResultRenderer,
   type ReportData,
 } from "./report.js";
-import { confirmBlock, editBlock, pickBlock, showExecutionResult } from "./ui.js";
+import { confirmBlock, editBlock, pickBlock, runWithLoader, showExecutionResult } from "./ui.js";
 
 /**
  * Stable ctx.ui.setStatus key used to publish the transient "running" status
@@ -168,18 +168,28 @@ export async function invokeFlow(ctx: ExtensionContext, deliverMessage: DeliverI
       return;
     }
 
-    // 6. Execute directly. On rejection, notify and bail out — no result
-    //    display or report.
+    // 6. Execute via runWithLoader (TUI: BorderedLoader with cancellation;
+    //    other modes: direct call, no custom UI). On rejection, notify and
+    //    bail out — no result display or report.
     const finalBlock = block; // capture for the confirmation loop
     let result: ExecuteResult;
     try {
       ctx.ui.setStatus(STATUS_KEY, `Running [${finalBlock.tag}]…`);
-      result = await executeBlock(descriptor, finalBlock.contents, ctx.cwd);
+      result = await runWithLoader(ctx, finalBlock, (signal, onOutput) =>
+        executeBlock(descriptor, finalBlock.contents, ctx.cwd, signal, onOutput),
+      );
     } catch (err) {
       ctx.ui.notify(`Execution failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
     } finally {
       ctx.ui.setStatus(STATUS_KEY, undefined);
+    }
+
+    // Cancellation does not necessarily mean the block required input —
+    // surface two accurate, independent facts: execution was cancelled, and
+    // /invoke never forwards stdin to the running process.
+    if (result.cancelled) {
+      ctx.ui.notify("Execution cancelled. /invoke is non-interactive; interactive input is unsupported.", "warning");
     }
 
     // 7. Deliver based on mode:

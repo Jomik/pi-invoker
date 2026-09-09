@@ -88,10 +88,15 @@ describe("resolveInterpreter — JavaScript and Node aliases", () => {
     expect(descriptor.command).toBe(process.execPath);
     expect(descriptor.args).toEqual([]);
   });
+
+  it.each(["javascript", "js", "node"] as const)("tag %s uses the .cjs script suffix", (tag) => {
+    const descriptor = resolveInterpreter(tag, { pathEnv: fakePath });
+    expect(descriptor.scriptSuffix).toBe(".cjs");
+  });
 });
 
 // ---------------------------------------------------------------------------
-// TypeScript alias resolution → current Node runtime + input-type flag
+// TypeScript alias resolution → current Node runtime + .mts script suffix
 // ---------------------------------------------------------------------------
 
 describe("resolveInterpreter — TypeScript aliases", () => {
@@ -102,9 +107,10 @@ describe("resolveInterpreter — TypeScript aliases", () => {
     expect(descriptor.command).toBe(process.execPath);
   });
 
-  it.each(["typescript", "ts"] as const)("tag %s includes --input-type=module-typescript", (tag) => {
+  it.each(["typescript", "ts"] as const)("tag %s has no extra args and uses the .mts script suffix", (tag) => {
     const descriptor = resolveInterpreter(tag, { nodeVersion: validVersion, pathEnv: fakePath });
-    expect(descriptor.args).toContain("--input-type=module-typescript");
+    expect(descriptor.args).toEqual([]);
+    expect(descriptor.scriptSuffix).toBe(".mts");
   });
 });
 
@@ -184,6 +190,16 @@ describe("resolveInterpreter — shell aliases (fake PATH)", () => {
     expect(descriptor.command).toContain("fish");
     expect(descriptor.args).toEqual([]);
   });
+
+  it("tag fish uses the .fish script suffix", () => {
+    const descriptor = resolveInterpreter("fish", { pathEnv: fakePath });
+    expect(descriptor.scriptSuffix).toBe(".fish");
+  });
+
+  it.each(["sh", "shell", "bash", "zsh"] as const)("tag %s uses the .sh script suffix", (tag) => {
+    const descriptor = resolveInterpreter(tag, { pathEnv: fakePath });
+    expect(descriptor.scriptSuffix).toBe(".sh");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -195,6 +211,11 @@ describe("resolveInterpreter — Python aliases (fake PATH)", () => {
     const descriptor = resolveInterpreter(tag, { pathEnv: fakePath });
     expect(descriptor.command).toContain("python3");
     expect(descriptor.args).toEqual([]);
+  });
+
+  it.each(["python", "python3", "py"] as const)("tag %s uses the .py script suffix", (tag) => {
+    const descriptor = resolveInterpreter(tag, { pathEnv: fakePath });
+    expect(descriptor.scriptSuffix).toBe(".py");
   });
 });
 
